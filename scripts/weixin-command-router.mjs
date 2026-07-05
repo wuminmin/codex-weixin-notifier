@@ -40,6 +40,8 @@ const INBOUND_MEDIA_DIR = "inbox";
 const DEFAULT_INTERACTIVE_CAPTURE_DELAY_MS = 3000;
 const DEFAULT_INTERACTIVE_CAPTURE_LINES = 120;
 const DEFAULT_INTERACTIVE_READY_TIMEOUT_MS = 20000;
+const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 60000;
+const DEFAULT_INTERACTIVE_RESPONSE_POLL_MS = 1000;
 
 const EXTENSION_TO_MIME = {
   ".bmp": "image/bmp",
@@ -1376,6 +1378,14 @@ function interactiveReadyTimeoutMs(config) {
   return Number(valueFrom(config.interactiveReadyTimeoutMs, process.env.CODEX_WEIXIN_INTERACTIVE_READY_TIMEOUT_MS, DEFAULT_INTERACTIVE_READY_TIMEOUT_MS));
 }
 
+function interactiveResponseTimeoutMs(config) {
+  return Number(valueFrom(config.interactiveResponseTimeoutMs, process.env.CODEX_WEIXIN_INTERACTIVE_RESPONSE_TIMEOUT_MS, DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS));
+}
+
+function interactiveResponsePollMs(config) {
+  return Number(valueFrom(config.interactiveResponsePollMs, process.env.CODEX_WEIXIN_INTERACTIVE_RESPONSE_POLL_MS, DEFAULT_INTERACTIVE_RESPONSE_POLL_MS));
+}
+
 function captureTmuxPane(sessionName, config) {
   const lines = Math.max(20, interactiveCaptureLines(config));
   const result = spawnSync("tmux", ["capture-pane", "-pt", sessionName, "-S", `-${lines}`], {
@@ -1404,9 +1414,10 @@ function cleanInteractiveCapture(text) {
     if (/^Tip:/u.test(trimmed)) return false;
     if (/^• You have /u.test(trimmed)) return false;
     if (/^[◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*Booting MCP server/u.test(trimmed)) return false;
+    if (/^›\s*/u.test(trimmed)) return false;
     if (/^gpt-[\w.-]+.*·/u.test(trimmed)) return false;
     return true;
-  }).join("\n").trim();
+  }).map((line) => line.replace(/^•\s*/u, "")).join("\n").trim();
 }
 
 function captureAfterPrevious(sessionName, previousCleaned, config) {
@@ -1420,6 +1431,24 @@ function captureAfterPrevious(sessionName, previousCleaned, config) {
     if (index !== -1) return cleaned.slice(index + tail.length).trim();
   }
   return cleaned;
+}
+
+function waitForInteractiveResponse(sessionName, previousCleaned, config) {
+  const deadline = Date.now() + interactiveResponseTimeoutMs(config);
+  let lastOutput = "";
+  let stableCount = 0;
+  while (Date.now() < deadline) {
+    const output = captureAfterPrevious(sessionName, previousCleaned, config);
+    if (output && output === lastOutput) {
+      stableCount += 1;
+      if (stableCount >= 2) return output;
+    } else if (output) {
+      lastOutput = output;
+      stableCount = 0;
+    }
+    sleepSync(interactiveResponsePollMs(config));
+  }
+  return lastOutput;
 }
 
 function paneLooksReady(text) {
@@ -1541,7 +1570,7 @@ function sendInteractiveInstruction(task, text, attachments, config) {
   const before = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
   sendTextToTmux(sessionName, mapped);
   sleepSync(interactiveCaptureDelayMs(config));
-  const output = captureAfterPrevious(sessionName, before, config);
+  const output = waitForInteractiveResponse(sessionName, before, config);
   return [
     taskHeader(task.id, started ? "interactive 已启动并发送" : "interactive 已发送"),
     `会话: ${sessionName}`,
