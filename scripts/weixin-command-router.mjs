@@ -1420,6 +1420,107 @@ function cleanInteractiveCapture(text) {
   }).map((line) => line.replace(/^•\s*/u, "")).join("\n").trim();
 }
 
+function cleanedInteractiveLines(text, options = {}) {
+  return stripAnsi(text).split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^[╭╮╰╯│─\s]+$/u.test(trimmed)) return false;
+    if (/^>_ OpenAI Codex/u.test(trimmed)) return false;
+    if (/^model:\s+/u.test(trimmed)) return false;
+    if (/^directory:\s+/u.test(trimmed)) return false;
+    if (/^Tip:/u.test(trimmed)) return false;
+    if (/^• You have /u.test(trimmed)) return false;
+    if (/^[◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*Booting MCP server/u.test(trimmed)) return false;
+    if (!options.keepPromptLines && /^›\s*/u.test(trimmed)) return false;
+    if (/^gpt-[\w.-]+.*·/u.test(trimmed)) return false;
+    return true;
+  }).map((line) => line.replace(/^•\s*/u, ""));
+}
+
+function extractInteractiveQuestion(text) {
+  const lines = cleanedInteractiveLines(text, { keepPromptLines: true });
+  const start = lines.findLastIndex((line) => {
+    return /Question\s+\d+\/\d+/iu.test(line) || /^Implement this plan\?/iu.test(line);
+  });
+  if (start === -1) return null;
+  const block = lines.slice(start).map((line) => line.trim()).filter(Boolean);
+  const options = [];
+  for (const line of block) {
+    const match = line.match(/^[›\s]*([1-9])\.\s+(.+)$/u);
+    if (match) options.push({ index: Number(match[1]), label: match[2].trim() });
+  }
+  if (options.length === 0) return null;
+  const questionLine = block.find((line, index) => {
+    if (/^Implement this plan\?/iu.test(line)) return true;
+    return index > 0
+      && !/^[›\s]*[1-9]\./u.test(line)
+      && !/tab to add notes|enter to submit|esc to interrupt|press enter to confirm/iu.test(line);
+  }) || "";
+  return {
+    text: [
+      "Codex 正在等待选择。请直接回复数字：",
+      questionLine ? `问题: ${questionLine}` : null,
+      ...options.map((option) => `${option.index}. ${option.label.replace(/\s+/gu, " ")}`),
+    ].filter(Boolean).join("\n"),
+    options,
+  };
+}
+
+function currentInteractiveQuestion(sessionName, config) {
+  if (!sessionName || !tmuxHasSession(sessionName)) return null;
+  return extractInteractiveQuestion(captureTmuxPane(sessionName, config));
+}
+
+function parseInteractiveChoice(text, optionCount) {
+  const match = String(text || "").trim().match(/^([1-9])(?:[.、\s].*)?$/u);
+  if (!match) return null;
+  const choice = Number(match[1]);
+  if (!Number.isInteger(choice) || choice < 1 || choice > optionCount) return null;
+  return choice;
+}
+
+function sendInteractiveChoice(sessionName, choice) {
+  for (let index = 1; index < choice; index += 1) {
+    const down = spawnSync("tmux", ["send-keys", "-t", sessionName, "Down"], { encoding: "utf8" });
+    if (down.status !== 0) {
+      throw new Error(`tmux choice down failed: ${down.stderr || down.stdout || `exit ${down.status}`}`);
+    }
+    sleepSync(80);
+  }
+  const enter = spawnSync("tmux", ["send-keys", "-t", sessionName, "C-m"], { encoding: "utf8" });
+  if (enter.status !== 0) {
+    throw new Error(`tmux choice enter failed: ${enter.stderr || enter.stdout || `exit ${enter.status}`}`);
+  }
+}
+
+function answerInteractiveQuestion(task, text, config) {
+  const sessionName = makeTmuxSessionName(task);
+  const question = currentInteractiveQuestion(sessionName, config);
+  if (!question) return null;
+
+  const choice = parseInteractiveChoice(text, question.options.length);
+  if (!choice) {
+    return [
+      taskHeader(task.id, "等待选择"),
+      `会话: ${sessionName}`,
+      "",
+      question.text,
+    ].join("\n");
+  }
+
+  const before = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
+  sendInteractiveChoice(sessionName, choice);
+  sleepSync(interactiveCaptureDelayMs(config));
+  const output = waitForInteractiveResponse(sessionName, before, config);
+  const nextQuestion = currentInteractiveQuestion(sessionName, config);
+  return [
+    taskHeader(task.id, `已选择 ${choice}`),
+    `会话: ${sessionName}`,
+    "",
+    nextQuestion ? nextQuestion.text : compactLines(output || "已提交选择，Codex 继续处理中。", 3000),
+  ].join("\n");
+}
+
 function captureAfterPrevious(sessionName, previousCleaned, config) {
   const cleaned = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
   if (!previousCleaned) return cleaned;
@@ -1555,9 +1656,11 @@ function sendInteractiveInstruction(task, text, attachments, config) {
   const imagePaths = imagePathsFromAttachments(attachments);
   const mapped = mapInteractiveCommand(text, attachments);
   if (config.dryRun) {
+    const command = valueFrom(config.codexCommand, process.env.CODEX_WEIXIN_CODEX_COMMAND, "codex");
+    const args = interactiveCodexArgs({ cwd: task.cwd, config, imagePaths });
     return [
       taskHeader(task.id, "interactive dry-run"),
-      `命令: codex --no-alt-screen --sandbox workspace-write --ask-for-approval never -C ${task.cwd}`,
+      `命令: ${[command, ...args].join(" ")}`,
       imagePaths.length ? `图片: ${imagePaths.join(" ")}` : null,
       "",
       mapped,
@@ -1573,11 +1676,12 @@ function sendInteractiveInstruction(task, text, attachments, config) {
     spawnSync("tmux", ["send-keys", "-t", sessionName, "C-m"], { encoding: "utf8" });
     output = waitForInteractiveResponse(sessionName, before, config);
   }
+  const question = currentInteractiveQuestion(sessionName, config);
   return [
     taskHeader(task.id, started ? "interactive 已启动并发送" : "interactive 已发送"),
     `会话: ${sessionName}`,
     "",
-    compactLines(output || "(暂无可抓取输出)", 3000),
+    question ? question.text : compactLines(output || "(暂无可抓取输出)", 3000),
   ].join("\n");
 }
 
@@ -1967,6 +2071,8 @@ function forwardToTask(task, text, config, fromUser = "", attachments = []) {
   if (simpleCommand) return runSimpleCommand(task, simpleCommand);
 
   if (selectedRunner(config) === "interactive") {
+    const answeredQuestion = answerInteractiveQuestion(task, instruction, config);
+    if (answeredQuestion) return answeredQuestion;
     return sendInteractiveInstruction(task, instruction, attachments, config);
   }
 

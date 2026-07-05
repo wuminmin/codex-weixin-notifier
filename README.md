@@ -143,12 +143,13 @@ By default, each task is a long-running interactive Codex session in a fixed tmu
 
 ```bash
 codex --no-alt-screen \
-  --sandbox workspace-write \
-  --ask-for-approval never \
+  --dangerously-bypass-approvals-and-sandbox \
   -C ~/codex/taskN
 ```
 
 The router sends ordinary Weixin text into the task tmux session and captures recent terminal output back to Weixin. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
+
+When Codex enters an interactive `Question 1/1` choice prompt, the router formats the question and numbered options for Weixin. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
 
 Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create `~/codex/task3`, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
 
@@ -231,13 +232,13 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 ```json
 {
   "codexCommand": "codex",
-  "codexSandbox": "workspace-write",
-  "codexGlobalArgs": ["--ask-for-approval", "never", "--sandbox", "workspace-write"],
+  "codexBypassSandbox": true,
+  "codexGlobalArgs": ["--dangerously-bypass-approvals-and-sandbox"],
   "codexArgs": ["--json", "--skip-git-repo-check"]
 }
 ```
 
-By default, Weixin tasks run interactive Codex with `--sandbox workspace-write` and `--ask-for-approval never`, which can write the fixed task directory `~/codex/taskN` and temporary files while still avoiding full WSL access. To intentionally run child Codex without sandboxing, set `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` or `"codexBypassSandbox": true`; this is dangerous because a Weixin message can then trigger writes anywhere the WSL user can access.
+For this WSL-first setup, Weixin tasks can run interactive Codex with `--dangerously-bypass-approvals-and-sandbox` by setting `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` or `"codexBypassSandbox": true`. This removes the Codex sandbox and approval prompts for child tasks, so a Weixin message can trigger writes anywhere the WSL user can access. Existing tmux task sessions keep the arguments they were started with; close and re-enter a task to pick up changed Codex arguments.
 
 `runner` defaults to `interactive` when tmux is installed. Set `CODEX_WEIXIN_RUNNER=tmux` for the older `codex exec` inside tmux behavior, or `CODEX_WEIXIN_RUNNER=spawn` for direct `codex exec`. Interactive tasks keep an attachable session open:
 
