@@ -12,10 +12,9 @@ const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
 const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
 const STATE_DIR = "~/.codex/weixin-notifier";
 const TASKS_PATH = `${STATE_DIR}/tasks.json`;
-const PENDING_PATH = `${STATE_DIR}/pending.json`;
+const CURRENT_PATH = `${STATE_DIR}/current-task.json`;
 const SYNC_PATH = `${STATE_DIR}/command-sync.json`;
 const LOG_DIR = `${STATE_DIR}/logs`;
-const FOCUS_PATH = `${STATE_DIR}/focus.json`;
 const COMPAT_SYNC_PATH = "~/.codex/channels/wechat/sync_buf.json";
 const COMPAT_CONTEXT_TOKENS_PATH = "~/.codex/channels/wechat/context_tokens.json";
 const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
@@ -28,6 +27,7 @@ const MESSAGE_ITEM_TEXT = 1;
 const ILINK_APP_ID = "bot";
 const ILINK_APP_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 6);
 const DEFAULT_RUNNER = "tmux";
+const DEFAULT_TASK_ID = "0";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 
 const runtimeChildren = new Map();
@@ -189,130 +189,144 @@ function isDryRun(args, config) {
   return args["dry-run"] === "true" || process.env.CODEX_WEIXIN_DRY_RUN === "1" || config.dryRun === true;
 }
 
+function defaultTaskCwd() {
+  return valueFrom(process.env.CODEX_WEIXIN_DEFAULT_CWD, process.env.PWD, os.homedir());
+}
+
+function normalizeTasksState(state) {
+  const tasks = Array.isArray(state?.tasks) ? [...state.tasks] : [];
+  let nextTaskId = Number(state?.nextTaskId || 1);
+  let defaultTask = tasks.find((task) => String(task.id) === DEFAULT_TASK_ID);
+  if (!defaultTask) {
+    defaultTask = {
+      id: DEFAULT_TASK_ID,
+      kind: "default",
+      intent: "默认 Codex 助理",
+      cwd: defaultTaskCwd(),
+      status: "default",
+      createdAt: new Date().toISOString(),
+      pendingInstructions: [],
+    };
+    tasks.unshift(defaultTask);
+  } else {
+    defaultTask.kind = "default";
+    defaultTask.intent = defaultTask.intent || "默认 Codex 助理";
+    defaultTask.cwd = defaultTask.cwd || defaultTaskCwd();
+    defaultTask.status = defaultTask.status || "default";
+    defaultTask.pendingInstructions = Array.isArray(defaultTask.pendingInstructions) ? defaultTask.pendingInstructions : [];
+  }
+
+  for (const task of tasks) {
+    const numericId = Number(task.id);
+    if (Number.isInteger(numericId) && numericId >= nextTaskId) nextTaskId = numericId + 1;
+  }
+  return { tasks, nextTaskId: Math.max(1, nextTaskId) };
+}
+
 function loadTasks() {
-  return readJsonFile(TASKS_PATH, { tasks: [] });
+  return normalizeTasksState(readJsonFile(TASKS_PATH, { tasks: [] }));
 }
 
 function saveTasks(state) {
+  const normalized = normalizeTasksState(state);
   return writeJsonFile(TASKS_PATH, {
-    tasks: Array.isArray(state.tasks) ? state.tasks : [],
+    tasks: normalized.tasks,
+    nextTaskId: normalized.nextTaskId,
     updatedAt: new Date().toISOString(),
   });
 }
 
-function pendingOwnerKey(request) {
-  return request?.fromUser ? `user:${focusKey(request.fromUser)}` : "local";
+function allocateTaskId() {
+  const state = loadTasks();
+  const id = String(state.nextTaskId || 1);
+  state.nextTaskId = Number(id) + 1;
+  saveTasks(state);
+  return id;
 }
 
-function normalizePendingRequests(requests) {
-  const seen = new Set();
-  const normalized = [];
-  for (const request of Array.isArray(requests) ? requests : []) {
-    const key = pendingOwnerKey(request);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    normalized.push(request);
-  }
-  return normalized;
+function loadCurrentTasks() {
+  return readJsonFile(CURRENT_PATH, { users: {} });
 }
 
-function loadPending() {
-  const pending = readJsonFile(PENDING_PATH, { requests: [] });
-  return {
-    ...pending,
-    requests: normalizePendingRequests(pending.requests),
-  };
-}
-
-function savePending(state) {
-  return writeJsonFile(PENDING_PATH, {
-    requests: normalizePendingRequests(state.requests),
-    updatedAt: new Date().toISOString(),
-  });
-}
-
-function latestPendingForUser(fromUser) {
-  const pending = loadPending();
-  const requests = Array.isArray(pending.requests) ? pending.requests : [];
-  const key = focusKey(fromUser);
-  return requests.find((request) => focusKey(request.fromUser) === key)
-    || requests.find((request) => !request.fromUser)
-    || null;
-}
-
-function removePending(requestId) {
-  const pending = loadPending();
-  const before = pending.requests.length;
-  pending.requests = pending.requests.filter((item) => item.id !== requestId);
-  savePending(pending);
-  return before !== pending.requests.length;
-}
-
-function updatePending(requestId, updater) {
-  const pending = loadPending();
-  const index = pending.requests.findIndex((item) => item.id === requestId);
-  if (index === -1) return null;
-  pending.requests[index] = updater({ ...pending.requests[index] });
-  savePending(pending);
-  return pending.requests[index];
-}
-
-function loadFocus() {
-  return readJsonFile(FOCUS_PATH, { users: {} });
-}
-
-function saveFocus(state) {
-  return writeJsonFile(FOCUS_PATH, {
+function saveCurrentTasks(state) {
+  return writeJsonFile(CURRENT_PATH, {
     users: state.users && typeof state.users === "object" ? state.users : {},
     updatedAt: new Date().toISOString(),
   });
 }
 
-function focusKey(fromUser) {
+function userKey(fromUser) {
   return String(fromUser || "local");
 }
 
-function getFocusedTask(fromUser) {
-  const state = loadFocus();
-  const entry = state.users?.[focusKey(fromUser)];
-  if (!entry?.target) return null;
-  const task = findTaskByTarget(entry.target);
-  if (!task) {
-    delete state.users[focusKey(fromUser)];
-    saveFocus(state);
-    return null;
-  }
-  return task;
+function findTaskByTarget(target) {
+  const state = loadTasks();
+  const normalized = String(target || "").trim().replace(/^task\s+/i, "");
+  return state.tasks.find((task) => {
+    return String(task.id) === normalized
+      || String(task.pid || "") === normalized
+      || task.tmuxSession === normalized;
+  }) || null;
 }
 
-function setFocusedTask(fromUser, target) {
+function getCurrentTask(fromUser) {
+  const current = loadCurrentTasks();
+  const target = current.users?.[userKey(fromUser)]?.currentTask || DEFAULT_TASK_ID;
+  return findTaskByTarget(target) || findTaskByTarget(DEFAULT_TASK_ID);
+}
+
+function setCurrentTask(fromUser, target) {
   const task = findTaskByTarget(target);
-  if (!task) return { ok: false, message: `No task matches ${target}. Use list to see recent task ids.` };
-  const state = loadFocus();
-  state.users[focusKey(fromUser)] = {
-    target: task.id,
+  if (!task) return { ok: false, message: `task ${target}: 不存在。发送 list 查看任务。` };
+  const current = loadCurrentTasks();
+  current.users[userKey(fromUser)] = {
+    currentTask: String(task.id),
     setAt: new Date().toISOString(),
   };
-  saveFocus(state);
+  saveCurrentTasks(current);
   return {
     ok: true,
     task,
-    message: [
-      `Focused task ${task.id}`,
-      `Status: ${task.status}`,
-      `Cwd: ${task.cwd}`,
-      "Plain messages will append to this task. Use unfocus to return plain messages to new-task mode.",
-    ].join("\n"),
+    message: [`task ${task.id}: 已切换`, `status=${task.status}`, `cwd=${task.cwd}`].join("\n"),
   };
 }
 
-function clearFocusedTask(fromUser) {
-  const state = loadFocus();
-  const key = focusKey(fromUser);
-  const existed = Boolean(state.users?.[key]);
-  delete state.users[key];
-  saveFocus(state);
-  return existed ? "Cleared focused task." : "No focused task was set.";
+function updateTask(taskId, updater) {
+  const state = loadTasks();
+  const index = state.tasks.findIndex((task) => String(task.id) === String(taskId));
+  if (index === -1) return null;
+  state.tasks[index] = updater({ ...state.tasks[index] });
+  saveTasks(state);
+  return state.tasks[index];
+}
+
+function createId(prefix) {
+  const stamp = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
+  const suffix = crypto.randomBytes(3).toString("hex");
+  return `${prefix}-${stamp}-${suffix}`;
+}
+
+function compact(text, max = 180) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 3)}...`;
+}
+
+function extractText(message) {
+  if (typeof message === "string") return message.trim();
+  for (const item of message?.item_list || []) {
+    const text = item?.text_item?.text;
+    if (typeof text === "string" && text.trim()) return text.trim();
+  }
+  return "";
+}
+
+function isInboundUserMessage(message) {
+  return message?.message_type === MESSAGE_TYPE_USER;
+}
+
+function getReplyTarget(message, config) {
+  return valueFrom(message?.group_id, message?.from_user_id, config.toUser, config.userId);
 }
 
 function loadCommandSync() {
@@ -346,160 +360,6 @@ function rememberRecipientContext(config, message, sync) {
   writeJsonFile(COMPAT_CONTEXT_TOKENS_PATH, contextTokens);
 
   writeJsonFile(COMPAT_SYNC_PATH, { get_updates_buf: sync || "", updatedAt: new Date().toISOString() });
-}
-
-function createId(prefix) {
-  const stamp = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
-  const suffix = crypto.randomBytes(3).toString("hex");
-  return `${prefix}-${stamp}-${suffix}`;
-}
-
-function compact(text, max = 180) {
-  const value = String(text || "").replace(/\s+/g, " ").trim();
-  if (value.length <= max) return value;
-  return `${value.slice(0, max - 3)}...`;
-}
-
-function tokenize(text) {
-  return String(text || "")
-    .toLowerCase()
-    .split(/[^a-z0-9_\-\u4e00-\u9fa5]+/u)
-    .filter((token) => token.length >= 2);
-}
-
-function unique(values) {
-  return [...new Set(values.filter(Boolean))];
-}
-
-function configuredWorkspaceRoots(config, args) {
-  const raw = valueFrom(args["workspace-root"], process.env.CODEX_WEIXIN_WORKSPACE_ROOT, config.workspaceRoot);
-  const roots = [];
-  if (raw) roots.push(...String(raw).split(path.delimiter));
-  roots.push(process.cwd(), "~/codex", "~/plugins", "~");
-  return unique(roots.map(expandHome)).filter((dir) => {
-    try {
-      return fs.statSync(dir).isDirectory();
-    } catch {
-      return false;
-    }
-  });
-}
-
-function findPathHint(intent) {
-  const matches = String(intent || "").match(/(?:~|\/)[^\s'"`]+/g) || [];
-  for (const match of matches) {
-    const resolved = expandHome(match.replace(/[.,;:!?，。；：！？]+$/u, ""));
-    try {
-      if (fs.statSync(resolved).isDirectory()) return resolved;
-    } catch {
-      // Ignore invalid path-like text.
-    }
-  }
-  return null;
-}
-
-function readProjectText(dir) {
-  const names = [".codex-plugin/plugin.json", "package.json", "README.md", "pyproject.toml", "Cargo.toml"];
-  const parts = [path.basename(dir), dir];
-  for (const name of names) {
-    const file = path.join(dir, name);
-    try {
-      if (fs.statSync(file).isFile()) parts.push(fs.readFileSync(file, "utf8").slice(0, 3000));
-    } catch {
-      // Optional project metadata.
-    }
-  }
-  return parts.join("\n");
-}
-
-function collectCandidateDirs(roots) {
-  const candidates = new Set();
-  for (const root of roots) {
-    candidates.add(root);
-    let entries = [];
-    try {
-      entries = fs.readdirSync(root, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-      const child = path.join(root, entry.name);
-      candidates.add(child);
-      let grandchildren = [];
-      try {
-        grandchildren = fs.readdirSync(child, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const grandchild of grandchildren) {
-        if (!grandchild.isDirectory() || grandchild.name.startsWith(".")) continue;
-        candidates.add(path.join(child, grandchild.name));
-      }
-    }
-  }
-  return [...candidates];
-}
-
-function scoreCandidate(dir, intentTokens) {
-  const haystack = readProjectText(dir).toLowerCase();
-  let score = 0;
-  for (const token of intentTokens) {
-    if (!token) continue;
-    if (haystack.includes(token)) score += token.length > 3 ? 3 : 1;
-    if (path.basename(dir).toLowerCase().includes(token)) score += 5;
-  }
-  for (const marker of [".git", ".codex-plugin", "package.json", "pyproject.toml"]) {
-    try {
-      if (fs.existsSync(path.join(dir, marker))) score += 1;
-    } catch {
-      // Ignore.
-    }
-  }
-  return score;
-}
-
-function proposeWorkdir(intent, config, args) {
-  const hinted = findPathHint(intent);
-  if (hinted) {
-    return { cwd: hinted, reason: "the instruction includes an existing directory path" };
-  }
-
-  const roots = configuredWorkspaceRoots(config, args);
-  const tokens = tokenize(intent);
-  const candidates = collectCandidateDirs(roots);
-  let best = roots[0] || process.cwd();
-  let bestScore = -1;
-
-  for (const candidate of candidates) {
-    const score = scoreCandidate(candidate, tokens);
-    if (score > bestScore || (score === bestScore && candidate.length < best.length)) {
-      best = candidate;
-      bestScore = score;
-    }
-  }
-
-  const reason = bestScore > 0
-    ? `matched ${bestScore} token/metadata signals from the task intent`
-    : "no strong project match was found, so the router used the default workspace root";
-  return { cwd: best, reason };
-}
-
-function extractText(message) {
-  if (typeof message === "string") return message.trim();
-  for (const item of message?.item_list || []) {
-    const text = item?.text_item?.text;
-    if (typeof text === "string" && text.trim()) return text.trim();
-  }
-  return "";
-}
-
-function isInboundUserMessage(message) {
-  return message?.message_type === MESSAGE_TYPE_USER;
-}
-
-function getReplyTarget(message, config) {
-  return valueFrom(message?.group_id, message?.from_user_id, config.toUser, config.userId);
 }
 
 async function getUpdates(config, syncBuf) {
@@ -577,15 +437,6 @@ async function sendText(text, config, args = {}) {
       },
     },
   });
-}
-
-function updateTask(taskId, updater) {
-  const state = loadTasks();
-  const index = state.tasks.findIndex((task) => task.id === taskId);
-  if (index === -1) return null;
-  state.tasks[index] = updater({ ...state.tasks[index] });
-  saveTasks(state);
-  return state.tasks[index];
 }
 
 function extractSessionId(value) {
@@ -685,7 +536,7 @@ function sanitizeTmuxName(value) {
 }
 
 function makeTmuxSessionName(task, runId) {
-  return sanitizeTmuxName(`codex-wx-${task.id}-${runId}`);
+  return sanitizeTmuxName(`codex-wx-task-${task.id}-${runId}`);
 }
 
 function tmuxHasSession(sessionName) {
@@ -702,18 +553,14 @@ function getTmuxPanePid(sessionName) {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
-function startTmuxRun({ task, prompt, config, resumeSessionId = "", resumeLast = false, command, args, runId, stdoutPath, stderrPath, lastMessagePath }) {
+function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, command, args, runId, stdoutPath, stderrPath, lastMessagePath }) {
   const sessionName = makeTmuxSessionName(task, runId);
   const shell = valueFrom(process.env.SHELL, "/bin/bash");
   const envPrefix = [
-    ["CODEX_SESSION_ID", task.id],
+    ["CODEX_SESSION_ID", `weixin-task-${task.id}`],
     ["CODEX_PRODUCT", "codex-weixin-command-router"],
   ].map(([key, value]) => `${key}=${shQuote(value)}`).join(" ");
-  const codexLine = [
-    envPrefix,
-    shQuote(command),
-    ...args.map(shQuote),
-  ].filter(Boolean).join(" ");
+  const codexLine = [envPrefix, shQuote(command), ...args.map(shQuote)].filter(Boolean).join(" ");
   const completionLine = [
     shQuote(process.execPath),
     shQuote(SCRIPT_PATH),
@@ -776,7 +623,7 @@ function startTmuxRun({ task, prompt, config, resumeSessionId = "", resumeLast =
 function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast = false }) {
   const command = valueFrom(config.codexCommand, process.env.CODEX_WEIXIN_CODEX_COMMAND, "codex");
   const runId = createId(resumeSessionId ? "wxr" : "wxrun");
-  const logBase = expandHome(path.join(LOG_DIR, task.id, runId));
+  const logBase = expandHome(path.join(LOG_DIR, String(task.id), runId));
   fs.mkdirSync(logBase, { recursive: true });
   const stdoutPath = path.join(logBase, "stdout.jsonl");
   const stderrPath = path.join(logBase, "stderr.log");
@@ -793,7 +640,6 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
   if (selectedRunner(config) === "tmux") {
     return startTmuxRun({
       task,
-      prompt,
       config,
       resumeSessionId,
       resumeLast,
@@ -810,13 +656,13 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
     cwd: task.cwd,
     env: {
       ...process.env,
-      CODEX_SESSION_ID: task.id,
+      CODEX_SESSION_ID: `weixin-task-${task.id}`,
       CODEX_PRODUCT: "codex-weixin-command-router",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  runtimeChildren.set(task.id, child);
+  runtimeChildren.set(String(task.id), child);
   writeTextFile(stdoutPath, "");
   writeTextFile(stderrPath, "");
 
@@ -859,7 +705,7 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
   });
 
   child.on("exit", async (code, signal) => {
-    runtimeChildren.delete(task.id);
+    runtimeChildren.delete(String(task.id));
     try {
       await completeTask({ taskId: task.id, runId, exitCode: code, signal, config });
     } catch (error) {
@@ -868,7 +714,7 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
   });
 
   child.on("error", (error) => {
-    runtimeChildren.delete(task.id);
+    runtimeChildren.delete(String(task.id));
     updateTask(task.id, (current) => ({
       ...current,
       status: "failed",
@@ -910,6 +756,86 @@ function extractSessionIdFromJsonl(filePath) {
   }
 }
 
+function formatDefaultTaskPrompt(instruction) {
+  return [
+    "You are task 0, the default Codex assistant behind a Weixin chat.",
+    "You decide whether the user's message can be answered directly, needs a short clarification, or should become a separate Codex subtask.",
+    "Do not use confirmation prompts as the main workflow.",
+    "",
+    "If a separate subtask should be started, include exactly one JSON object on its own line at the end of your final answer:",
+    '{"type":"create_task","cwd":"/absolute/workdir","prompt":"the full task instruction"}',
+    "",
+    "Use an existing absolute cwd when you can infer it. If you cannot infer a safe cwd, ask a concise clarification instead of creating a task.",
+    "If you answer directly or ask a clarification, do not include the JSON protocol.",
+    "",
+    "Weixin user message:",
+    instruction,
+  ].join("\n");
+}
+
+function formatAppendPrompt(task, instruction) {
+  if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction);
+  return [
+    `Continue the existing task ${task.id}.`,
+    `Original task: ${task.intent}`,
+    "",
+    "Additional instruction from Weixin:",
+    instruction,
+  ].join("\n");
+}
+
+function extractCreateTaskDirective(text) {
+  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
+    if (!line.startsWith("{") || !line.endsWith("}")) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed?.type === "create_task" && parsed.cwd && parsed.prompt) return parsed;
+    } catch {
+      // Ignore non-protocol JSON-like text.
+    }
+  }
+  return null;
+}
+
+function createNumberedTask({ prompt, cwd, fromUser = "", kind = "subtask", parentTaskId = DEFAULT_TASK_ID, config }) {
+  const resolvedCwd = expandHome(cwd);
+  try {
+    if (!fs.statSync(resolvedCwd).isDirectory()) {
+      return { ok: false, message: `task ${parentTaskId}: 子任务目录不存在：${resolvedCwd}` };
+    }
+  } catch {
+    return { ok: false, message: `task ${parentTaskId}: 子任务目录不存在：${resolvedCwd}` };
+  }
+
+  const task = {
+    id: allocateTaskId(),
+    kind,
+    parentTaskId,
+    intent: prompt,
+    cwd: resolvedCwd,
+    status: "starting",
+    fromUser,
+    createdAt: new Date().toISOString(),
+    pendingInstructions: [],
+  };
+  const state = loadTasks();
+  state.tasks.unshift(task);
+  saveTasks(state);
+  const run = startCodexRun({ task, prompt, config });
+  return {
+    ok: true,
+    task: { ...task, pid: run.pid },
+    message: [
+      `task ${parentTaskId}: 已创建 task ${task.id}`,
+      `task ${task.id}: [starting] cwd=${task.cwd}`,
+      run.tmuxSession ? `tmux=${run.tmuxSession}` : null,
+      run.pid ? `pid=${run.pid}` : null,
+    ].filter(Boolean).join("\n"),
+  };
+}
+
 async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   const numericExit = exitCode === null || exitCode === undefined || exitCode === ""
     ? null
@@ -929,12 +855,12 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   });
 
   if (!latest) return null;
-  const pending = Array.isArray(latest.pendingInstructions) ? [...latest.pendingInstructions] : [];
-  if (pending.length > 0) {
-    const nextInstruction = pending.shift();
+  const queued = Array.isArray(latest.pendingInstructions) ? [...latest.pendingInstructions] : [];
+  if (queued.length > 0) {
+    const nextInstruction = queued.shift();
     const updated = updateTask(latest.id, (current) => ({
       ...current,
-      pendingInstructions: pending,
+      pendingInstructions: queued,
       status: "queued",
       updatedAt: new Date().toISOString(),
     }));
@@ -951,14 +877,26 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   }
 
   const last = readLastMessage(latest);
+  const directive = String(latest.id) === DEFAULT_TASK_ID ? extractCreateTaskDirective(last) : null;
+  if (directive) {
+    const created = createNumberedTask({
+      prompt: directive.prompt,
+      cwd: directive.cwd,
+      fromUser: latest.fromUser || "",
+      parentTaskId: latest.id,
+      config,
+    });
+    await sendText(created.message, config);
+    return latest;
+  }
+
   await sendText(
     [
-      `Task ${latest.id} ${latest.status}`,
-      `Exit: ${numericExit === null ? signal || "unknown" : numericExit}`,
-      `Runner: ${latest.runner || "spawn"}`,
-      latest.tmuxSession ? `Tmux: ${latest.tmuxSession}` : null,
-      latest.tmuxAttach ? `Attach: ${latest.tmuxAttach}` : null,
-      `Cwd: ${latest.cwd}`,
+      `task ${latest.id}: ${latest.status}`,
+      `exit=${numericExit === null ? signal || "unknown" : numericExit}`,
+      `cwd=${latest.cwd}`,
+      latest.tmuxSession ? `tmux=${latest.tmuxSession}` : null,
+      latest.tmuxAttach ? `attach=${latest.tmuxAttach}` : null,
       last ? "" : null,
       last ? compact(last, 1200) : null,
     ].filter(Boolean).join("\n"),
@@ -967,385 +905,44 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   return latest;
 }
 
-function formatAppendPrompt(task, instruction) {
-  return [
-    `Continue the existing task ${task.id}.`,
-    `Original task: ${task.intent}`,
-    "",
-    "Additional instruction from Weixin:",
-    instruction,
-  ].join("\n");
-}
+function forwardToTask(task, text, config, fromUser = "") {
+  const instruction = String(text || "").trim();
+  if (!instruction) return `task ${task.id}: 空消息已忽略`;
 
-function findTaskByTarget(target) {
-  const state = loadTasks();
-  const normalized = String(target || "").trim();
-  const withoutPrefix = normalized.replace(/^(task|pid|tmux):/i, "");
-  return state.tasks.find((task) => {
-    return task.id === withoutPrefix
-      || task.id.startsWith(withoutPrefix)
-      || String(task.pid || "") === withoutPrefix
-      || task.tmuxSession === withoutPrefix
-      || String(task.tmuxSession || "").startsWith(withoutPrefix);
-  }) || null;
-}
-
-function readProcessInfo(pid) {
-  const normalized = String(pid || "").replace(/^pid:/i, "");
-  if (!/^\d+$/.test(normalized)) return null;
-  try {
-    const cwd = fs.readlinkSync(`/proc/${normalized}/cwd`);
-    const cmdline = fs.readFileSync(`/proc/${normalized}/cmdline`, "utf8").replace(/\0/g, " ").trim();
-    if (!/\bcodex\b/.test(cmdline)) return null;
-    if (/\bcodex\s+app-server\b/.test(cmdline)) return null;
-    return { pid: Number(normalized), cwd, cmdline };
-  } catch {
-    return null;
-  }
-}
-
-function startTaskFromPending(requestId, cwdOverride, config) {
-  const pending = loadPending();
-  const request = pending.requests.find((item) => item.id === requestId || item.id.startsWith(requestId));
-  if (!request) return { ok: false, message: `No pending task matches ${requestId}.` };
-
-  const cwd = expandHome(cwdOverride || request.proposedCwd);
-  try {
-    if (!fs.statSync(cwd).isDirectory()) return { ok: false, message: `Directory does not exist: ${cwd}` };
-  } catch {
-    return { ok: false, message: `Directory does not exist: ${cwd}` };
-  }
-
-  const task = {
-    id: request.id.replace(/^req-/, "task-"),
-    intent: request.intent,
-    cwd,
-    status: "starting",
-    fromUser: request.fromUser,
-    createdAt: request.createdAt,
-    confirmedAt: new Date().toISOString(),
-    pendingInstructions: [],
+  const entry = {
+    id: createId("inst"),
+    text: instruction,
+    addedAt: new Date().toISOString(),
   };
 
-  pending.requests = pending.requests.filter((item) => item.id !== request.id);
-  savePending(pending);
-  const state = loadTasks();
-  state.tasks.unshift(task);
-  saveTasks(state);
-  const run = startCodexRun({ task, prompt: request.intent, config });
-  return {
-    ok: true,
-    task: { ...task, pid: run.pid },
-    message: [
-      `Started task ${task.id}`,
-      `Runner: ${run.tmuxSession ? "tmux" : "spawn"}`,
-      run.pid ? `PID: ${run.pid}` : null,
-      run.tmuxSession ? `Tmux: ${run.tmuxSession}` : null,
-      run.tmuxSession ? `Attach: tmux attach -t ${run.tmuxSession}` : null,
-      `Cwd: ${task.cwd}`,
-      `Intent: ${compact(task.intent)}`,
-    ].filter(Boolean).join("\n"),
-  };
-}
-
-function createPendingTask(intent, fromUser, config, args) {
-  const proposal = proposeWorkdir(intent, config, args);
-  const request = {
-    id: createId("req"),
-    kind: "create",
-    summary: "启动新任务",
-    text: intent,
-    intent,
-    cwd: proposal.cwd,
-    proposedCwd: proposal.cwd,
-    reason: proposal.reason,
-    fromUser,
-    status: "pending_yes_no",
-    createdAt: new Date().toISOString(),
-  };
-  const pending = loadPending();
-  pending.requests = pending.requests.filter((item) => pendingOwnerKey(item) !== pendingOwnerKey(request));
-  pending.requests.unshift(request);
-  savePending(pending);
-  return request;
-}
-
-function createPendingAction(action) {
-  const pending = loadPending();
-  const request = {
-    id: createId("req"),
-    status: "pending_yes_no",
-    createdAt: new Date().toISOString(),
-    ...action,
-  };
-  pending.requests = pending.requests.filter((item) => pendingOwnerKey(item) !== pendingOwnerKey(request));
-  pending.requests.unshift(request);
-  savePending(pending);
-  return request;
-}
-
-function recentFinishedTasks(limit = 8) {
-  const state = loadTasks();
-  return (state.tasks || [])
-    .filter((task) => ["completed", "failed", "unknown", "running", "queued", "starting"].includes(task.status))
-    .sort((a, b) => String(b.updatedAt || b.finishedAt || b.createdAt).localeCompare(String(a.updatedAt || a.finishedAt || a.createdAt)))
-    .slice(0, limit);
-}
-
-function scoreTaskForText(task, text) {
-  const haystack = [
-    task.id,
-    task.cwd,
-    path.basename(task.cwd || ""),
-    task.intent,
-    task.tmuxSession,
-  ].join("\n").toLowerCase();
-  let score = 0;
-  for (const token of tokenize(text)) {
-    if (haystack.includes(token)) score += token.length > 3 ? 4 : 1;
-  }
-  if (/刚才|继续|追加|补充|再|日志|修复|检查|看一下/u.test(text)) score += 1;
-  return score;
-}
-
-function chooseTaskForText(text, fromUser) {
-  const focused = getFocusedTask(fromUser);
-  if (focused) return focused;
-
-  let best = null;
-  let bestScore = 0;
-  for (const task of recentFinishedTasks(12)) {
-    const score = scoreTaskForText(task, text);
-    if (score > bestScore) {
-      best = task;
-      bestScore = score;
-    }
-  }
-  return bestScore > 0 ? best : null;
-}
-
-function planNaturalMessage(text, fromUser, config, args) {
-  const trimmed = String(text || "").trim();
-  if (!trimmed) {
-    return createPendingAction({
-      kind: "ask",
-      fromUser,
-      question: "你想让我做什么？",
-      summary: "需要补充需求",
-    });
+  if (["running", "starting", "queued"].includes(task.status)) {
+    const updated = updateTask(task.id, (current) => ({
+      ...current,
+      fromUser: fromUser || current.fromUser || "",
+      pendingInstructions: [...(current.pendingInstructions || []), entry.text],
+      updatedAt: new Date().toISOString(),
+    }));
+    return [
+      `task ${updated.id}: 已排队`,
+      `status=${updated.status}`,
+      `queued=${updated.pendingInstructions.length}`,
+    ].join("\n");
   }
 
-  if (/^(状态|看看|查看|最近|任务|进度|结果)/u.test(trimmed) || /任务.*(状态|列表|进度|结果)/u.test(trimmed)) {
-    return createPendingAction({
-      kind: "view",
-      fromUser,
-      summary: "显示任务状态和最近任务",
-    });
-  }
-
-  const wantsCreate = /(新任务|启动|开始|创建|新开|另开|从头)/u.test(trimmed)
-    || /^(帮我|请|处理|做|实现|修复|检查|改|写)/u.test(trimmed);
-  const wantsSend = /(继续|追加|补充|接着|刚才|那个|这个|日志|再)/u.test(trimmed);
-  const target = wantsCreate ? null : (wantsSend ? chooseTaskForText(trimmed, fromUser) : getFocusedTask(fromUser));
-
-  if (target) {
-    return createPendingAction({
-      kind: "send",
-      fromUser,
-      target: target.id,
-      text: trimmed,
-      summary: `发送给 ${target.id}`,
-    });
-  }
-
-  const proposal = proposeWorkdir(trimmed, config, args);
-  return createPendingAction({
-    kind: "create",
-    fromUser,
-    summary: "启动新任务",
-    text: trimmed,
-    intent: trimmed,
-    cwd: proposal.cwd,
-    proposedCwd: proposal.cwd,
-    reason: proposal.reason,
+  const updated = updateTask(task.id, (current) => ({
+    ...current,
+    fromUser: fromUser || current.fromUser || "",
+    status: "queued",
+    updatedAt: new Date().toISOString(),
+  }));
+  startCodexRun({
+    task: updated,
+    prompt: formatAppendPrompt(updated, entry.text),
+    config,
+    resumeSessionId: updated.codexSessionId || "",
+    resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
   });
-}
-
-function listChildDirs(parent, limit = 12) {
-  try {
-    return fs.readdirSync(parent, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
-      .map((entry) => path.join(parent, entry.name))
-      .slice(0, limit);
-  } catch {
-    return [];
-  }
-}
-
-function meaningfulPathTokens(text) {
-  return tokenize(text)
-    .filter((token) => ![
-      "是",
-      "不是",
-      "目录",
-      "里面",
-      "子文件夹",
-      "文件夹",
-      "godot",
-      "应该",
-      "改成",
-      "换成",
-      "the",
-      "subfolder",
-      "folder",
-    ].includes(token));
-}
-
-function chooseChildDir(parent, text) {
-  const tokens = meaningfulPathTokens(text);
-  if (!tokens.length) return null;
-  let best = null;
-  let bestScore = 0;
-  for (const child of listChildDirs(parent, 200)) {
-    const name = path.basename(child).toLowerCase();
-    let score = 0;
-    for (const token of tokens) {
-      if (name.includes(token.toLowerCase())) score += token.length > 3 ? 4 : 1;
-    }
-    if (score > bestScore) {
-      best = child;
-      bestScore = score;
-    }
-  }
-  return best;
-}
-
-function revisePendingAction(text, fromUser, config, args) {
-  const request = latestPendingForUser(fromUser);
-  if (!request) return null;
-  const kind = request.kind || "create";
-  const trimmed = String(text || "").trim();
-  if (!trimmed) return formatProposal(request);
-
-  if (kind === "create") {
-    const currentCwd = request.cwd || request.proposedCwd;
-    if (/子文件夹|subfolder/i.test(trimmed) && currentCwd) {
-      const child = chooseChildDir(currentCwd, trimmed);
-      if (!child) {
-        const children = listChildDirs(currentCwd, 8).map((dir) => path.basename(dir));
-        return [
-          "我理解你是在修正当前准备动作：目录要用 godot 的子文件夹。",
-          "但还缺子文件夹名字。",
-          children.length ? `可见子目录：${children.join(", ")}` : null,
-          "",
-          "直接发子文件夹名字；yes 仍会用当前目录。",
-        ].filter(Boolean).join("\n");
-      }
-      const updated = updatePending(request.id, (current) => ({
-        ...current,
-        cwd: child,
-        proposedCwd: child,
-        text: current.text || current.intent,
-        clarification: compact(trimmed, 300),
-        reason: `updated from clarification: ${trimmed}`,
-        updatedAt: new Date().toISOString(),
-      }));
-      return [
-        "已修改当前准备动作。",
-        "",
-        formatProposal(updated),
-      ].join("\n");
-    }
-
-    const explicit = findPathHint(trimmed);
-    const combined = [request.text || request.intent, trimmed].filter(Boolean).join("\n");
-    const proposal = explicit
-      ? { cwd: explicit, reason: "the clarification includes an existing directory path" }
-      : proposeWorkdir(combined, config, args);
-    const updated = updatePending(request.id, (current) => ({
-      ...current,
-      text: combined,
-      intent: combined,
-      cwd: proposal.cwd,
-      proposedCwd: proposal.cwd,
-      clarification: compact(trimmed, 300),
-      reason: proposal.reason,
-      updatedAt: new Date().toISOString(),
-    }));
-    return [
-      "已按补充说明修改当前准备动作。",
-      "",
-      formatProposal(updated),
-    ].join("\n");
-  }
-
-  if (kind === "send") {
-    const updated = updatePending(request.id, (current) => ({
-      ...current,
-      text: [current.text || current.instruction, trimmed].filter(Boolean).join("\n"),
-      updatedAt: new Date().toISOString(),
-    }));
-    return [
-      "已修改当前准备发送的内容。",
-      "",
-      formatProposal(updated),
-    ].join("\n");
-  }
-
-  return null;
-}
-
-function cancelPending(requestId) {
-  const pending = loadPending();
-  const before = pending.requests.length;
-  pending.requests = pending.requests.filter((item) => !(item.id === requestId || item.id.startsWith(requestId)));
-  savePending(pending);
-  return before !== pending.requests.length;
-}
-
-function formatProposal(request) {
-  const kind = request.kind || "create";
-  if (kind === "create") {
-    return [
-      "准备：启动新任务",
-      `目录：${request.cwd || request.proposedCwd}`,
-      `内容：${compact(request.text || request.intent, 500)}`,
-      request.reason ? `依据：${request.reason}` : null,
-      "",
-      "回复 yes 执行，no 取消",
-    ].filter(Boolean).join("\n");
-  }
-  if (kind === "send") {
-    return [
-      "准备：发送给已有任务",
-      `目标：${request.target}`,
-      `内容：${compact(request.text || request.instruction, 500)}`,
-      "",
-      "回复 yes 执行，no 取消",
-    ].join("\n");
-  }
-  if (kind === "view") {
-    return [
-      "准备：查看状态",
-      request.summary || "显示任务状态",
-      "",
-      "回复 yes 执行，no 取消",
-    ].join("\n");
-  }
-  if (kind === "ask") {
-    return request.question || request.summary || "我需要你再说明一下。";
-  }
-
-  return [
-    `Ready to start ${request.id}`,
-    `Intent: ${compact(request.intent, 500)}`,
-    `Suggested cwd: ${request.proposedCwd}`,
-    `Reason: ${request.reason}`,
-    "",
-    `Reply "confirm ${request.id}" to start.`,
-    `Reply "dir ${request.id} /path/to/workspace" to change cwd and start.`,
-    `Reply "cancel ${request.id}" to discard.`,
-  ].join("\n");
+  return [`task ${updated.id}: 已开始`, `cwd=${updated.cwd}`].join("\n");
 }
 
 function pruneDeadTasks() {
@@ -1374,369 +971,55 @@ function pruneDeadTasks() {
   return state;
 }
 
-function listCodexProcesses() {
-  const proc = spawn("ps", ["-eo", "pid,ppid,stat,comm,args"], { stdio: ["ignore", "pipe", "ignore"] });
-  return new Promise((resolve) => {
-    const chunks = [];
-    proc.stdout.on("data", (chunk) => chunks.push(chunk));
-    proc.on("exit", () => {
-      const text = Buffer.concat(chunks).toString("utf8");
-      const rows = text.split(/\r?\n/)
-        .map((line) => {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith("PID ")) return null;
-          const parts = trimmed.split(/\s+/, 5);
-          const pid = parts[0] || "";
-          const ppid = parts[1] || "";
-          const stat = parts[2] || "";
-          const comm = parts[3] || "";
-          const command = parts[4] || "";
-          if (comm !== "codex") return null;
-          if (stat.includes("Z")) return null;
-          if (/\bcodex\s+app-server\b/.test(trimmed)) return null;
-          if (trimmed.includes("weixin-command-router.mjs")) return null;
-          let cwd = "(unavailable)";
-          try {
-            cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
-          } catch {
-            // The process may exit between ps and cwd lookup.
-          }
-          return [
-            `pid=${pid}`,
-            `ppid=${ppid}`,
-            `stat=${stat}`,
-            `cwd=${cwd}`,
-            `cmd=${compact(command, 160)}`,
-          ].join(" | ");
-        })
-        .filter(Boolean)
-        .slice(0, 20);
-      resolve(rows);
-    });
-    proc.on("error", () => resolve([]));
-  });
-}
-
-function formatTaskLine(task, intentMax = 100) {
+function formatTaskLine(task, fromUser = "") {
+  const current = getCurrentTask(fromUser);
+  const tags = [];
+  if (String(task.id) === DEFAULT_TASK_ID) tags.push("default");
+  else tags.push(task.status || "unknown");
+  if (String(current?.id) === String(task.id)) tags.push("current");
   return [
-    `${task.id} [${task.status}]`,
-    `runner=${task.runner || "spawn"}`,
-    task.tmuxSession ? `tmux=${task.tmuxSession}` : null,
-    `pid=${task.pid || "-"}`,
+    `task ${task.id} [${tags.join(",")}]`,
     `cwd=${task.cwd}`,
-    task.finishedAt ? `finished=${task.finishedAt}` : null,
-    `intent=${compact(task.intent, intentMax)}`,
-  ].filter(Boolean).join(" | ");
+    task.intent ? compact(task.intent, 120) : null,
+  ].filter(Boolean).join(" ");
 }
 
 async function formatList(fromUser = "") {
   const state = pruneDeadTasks();
-  const pending = loadPending();
-  const taskLines = state.tasks
-    .filter((task) => ["starting", "running", "queued", "unknown"].includes(task.status))
-    .slice(0, 12)
-    .map((task) => formatTaskLine(task));
-
-  const recentLines = state.tasks
-    .filter((task) => ["completed", "failed", "canceled"].includes(task.status))
-    .sort((a, b) => String(b.finishedAt || b.updatedAt || b.createdAt).localeCompare(String(a.finishedAt || a.updatedAt || a.createdAt)))
-    .slice(0, 8)
-    .map((task) => formatTaskLine(task, 120));
-
-  const pendingLines = pending.requests.slice(0, 8).map((request) => (
-    `${request.id} [${request.kind || "create"}] | ${request.cwd || request.proposedCwd || request.target || "-"} | ${compact(request.text || request.intent || request.summary || request.question, 100)}`
-  ));
-  const processes = await listCodexProcesses();
-  const focused = getFocusedTask(fromUser);
-
-  return [
-    focused ? `Focused task: ${focused.id} [${focused.status}] | cwd=${focused.cwd}` : "Focused task: (none)",
-    "",
-    "Codex Weixin tasks",
-    taskLines.length ? taskLines.join("\n") : "(no active registered tasks)",
-    "",
-    "Recent completed tasks",
-    recentLines.length ? recentLines.join("\n") : "(none)",
-    "",
-    "Pending confirmations",
-    pendingLines.length ? pendingLines.join("\n") : "(none)",
-    "",
-    "Codex processes",
-    processes.length ? processes.join("\n") : "(none found)",
-  ].join("\n");
-}
-
-function appendInstruction(target, instruction, config) {
-  const task = findTaskByTarget(target);
-  if (!task) {
-    const processInfo = readProcessInfo(target);
-    if (!processInfo) {
-      return {
-        ok: false,
-        message: `No registered task or Codex process matches ${target}. Use "list" to see task ids and pids.`,
-      };
-    }
-    const followup = {
-      id: createId("task"),
-      intent: `Follow-up for external Codex process ${processInfo.pid}: ${instruction}`,
-      cwd: processInfo.cwd,
-      status: "starting",
-      externalPid: processInfo.pid,
-      externalCommand: processInfo.cmdline,
-      createdAt: new Date().toISOString(),
-      confirmedAt: new Date().toISOString(),
-      pendingInstructions: [],
-      resumeLast: true,
-    };
-    const state = loadTasks();
-    state.tasks.unshift(followup);
-    saveTasks(state);
-    startCodexRun({
-      task: followup,
-      prompt: [
-        `Append this instruction to the most recent Codex session for process ${processInfo.pid}.`,
-        "",
-        instruction,
-      ].join("\n"),
-      config,
-      resumeLast: true,
-    });
-    return {
-      ok: true,
-      message: [
-        `Started follow-up for external Codex process ${processInfo.pid}.`,
-        `Registered as ${followup.id}.`,
-        `Cwd: ${processInfo.cwd}`,
-        "The router uses `codex exec resume --last` in that cwd; arbitrary terminal injection is not attempted.",
-      ].join("\n"),
-    };
-  }
-
-  const entry = {
-    id: createId("inst"),
-    text: instruction,
-    addedAt: new Date().toISOString(),
-  };
-
-  if (["running", "starting"].includes(task.status)) {
-    const updated = updateTask(task.id, (current) => ({
-      ...current,
-      pendingInstructions: [...(current.pendingInstructions || []), entry.text],
-      updatedAt: new Date().toISOString(),
-    }));
-    return {
-      ok: true,
-      message: [
-        `Queued instruction for running task ${updated.id}.`,
-        "It will run automatically after the current Codex turn finishes.",
-        `Instruction: ${compact(entry.text, 500)}`,
-      ].join("\n"),
-    };
-  }
-
-  if (task.status === "queued") {
-    const updated = updateTask(task.id, (current) => ({
-      ...current,
-      pendingInstructions: [...(current.pendingInstructions || []), entry.text],
-      updatedAt: new Date().toISOString(),
-    }));
-    return {
-      ok: true,
-      message: `Queued another instruction for ${updated.id}.`,
-    };
-  }
-
-  const updated = updateTask(task.id, (current) => ({
-    ...current,
-    status: "queued",
-    pendingInstructions: [],
-    updatedAt: new Date().toISOString(),
-  }));
-  if (!updated) {
-    return { ok: false, message: `Could not update task ${task.id}.` };
-  }
-  startCodexRun({
-    task: updated,
-    prompt: formatAppendPrompt(updated, entry.text),
-    config,
-    resumeSessionId: updated.codexSessionId || "",
-    resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
-  });
-  return {
-    ok: true,
-    message: [
-      `Started follow-up instruction for ${updated.id}.`,
-      updated.codexSessionId ? `Resuming Codex session: ${updated.codexSessionId}` : "No session id was found; using task context in a new Codex run.",
-    ].join("\n"),
-  };
-}
-
-async function acceptPendingAction(fromUser, config) {
-  const request = latestPendingForUser(fromUser);
-  if (!request) return "没有待确认事项。直接发需求给我就行。";
-  const kind = request.kind || "create";
-
-  if (kind === "create") {
-    const result = startTaskFromPending(request.id, request.cwd || request.proposedCwd, config);
-    if (result.ok && result.task?.id) {
-      setFocusedTask(fromUser, result.task.id);
-    }
-    return result.ok
-      ? `${result.message}\n\n已自动切到这个任务。后续普通文字会先准备发送给它。`
-      : result.message;
-  }
-
-  removePending(request.id);
-  if (kind === "send") {
-    const result = appendInstruction(request.target, request.text || request.instruction, config);
-    if (result.ok) setFocusedTask(fromUser, request.target);
-    return result.message;
-  }
-
-  if (kind === "view") {
-    return formatList(fromUser);
-  }
-
-  if (kind === "ask") {
-    return request.question || "我还需要你补充一句。";
-  }
-
-  return `未知待确认类型：${kind}`;
-}
-
-function rejectPendingAction(fromUser) {
-  const request = latestPendingForUser(fromUser);
-  if (!request) return "没有待取消事项。";
-  removePending(request.id);
-  return "已取消。";
+  const ordered = state.tasks
+    .slice()
+    .sort((a, b) => Number(a.id) - Number(b.id));
+  return ordered.map((task) => formatTaskLine(task, fromUser)).join("\n");
 }
 
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
-  const yesPattern = /^(yes|y|ok|okay|好|好的|是|确认|可以|行|执行|启动|开始)$/iu;
-  const noPattern = /^(no|n|nope|不|不要|否|取消|算了|停止)$/iu;
-  const listPattern = /^(s|show|status|list|ls|tasks|processes|状态|进度|任务|列表|进程)$/iu;
-  const helpPattern = /^(help|帮助|\?)$/iu;
-  const focusStatusPattern = /^(focus|焦点)$/iu;
-  const focusPattern = /^(focus|use|select|切换|选中|焦点)\s+(\S+)$/iu;
-  const unfocusPattern = /^(unfocus|clear focus|取消焦点|退出焦点)$/iu;
-  const confirmPattern = /^(confirm|确认|start|开始)\s+(\S+)(?:\s+(.+))?$/iu;
-  const dirPattern = /^(dir|cwd|目录|工作目录)\s+(\S+)\s+(.+)$/iu;
-  const cancelPattern = /^(cancel|取消)\s+(\S+)$/iu;
-  const appendPattern = /^(append|追加|send|发|to|给|继续)\s+(\S+)\s+([\s\S]+)$/iu;
-  const mentionPattern = /^@(\S+)\s+([\s\S]+)$/iu;
-  const newPattern = /^(new|task|开始任务|新任务)\s+([\s\S]+)$/iu;
-
-  let match = trimmed.match(listPattern);
-  if (trimmed.match(yesPattern)) return { type: "yes" };
-  if (trimmed.match(noPattern)) return { type: "no" };
-  if (match) return { type: "list" };
-  match = trimmed.match(helpPattern);
-  if (match) return { type: "help" };
-  match = trimmed.match(focusStatusPattern);
-  if (match) return { type: "focus-status" };
-  match = trimmed.match(focusPattern);
-  if (match) return { type: "focus", target: match[2] };
-  match = trimmed.match(unfocusPattern);
-  if (match) return { type: "unfocus" };
-  match = trimmed.match(confirmPattern);
-  if (match) return { type: "confirm", id: match[2], cwd: match[3] || "" };
-  match = trimmed.match(dirPattern);
-  if (match) return { type: "confirm", id: match[2], cwd: match[3] };
-  match = trimmed.match(cancelPattern);
-  if (match) return { type: "cancel", id: match[2] };
-  match = trimmed.match(appendPattern);
-  if (match) return { type: "append", target: match[2], instruction: match[3] };
-  match = trimmed.match(mentionPattern);
-  if (match) return { type: "append", target: match[1], instruction: match[2] };
-  match = trimmed.match(newPattern);
-  if (match) return { type: "new", intent: match[2] };
+  if (/^list$/iu.test(trimmed)) return { type: "list" };
+  const taskMatch = trimmed.match(/^task\s+(\d+)$/iu);
+  if (taskMatch) return { type: "switch", id: taskMatch[1] };
   return { type: "message", text: trimmed };
 }
 
-function formatHelp(fromUser = "") {
-  const focused = getFocusedTask(fromUser);
-  return [
-    "直接发需求，我会先给出准备动作。",
-    "回复 yes 执行，no 取消。",
-    "",
-    "可选：s / show / list 查看状态",
-    "可选：@task-id 补充指令",
-    "",
-    focused
-      ? `当前默认目标：${focused.id}`
-      : "当前没有默认目标。",
-  ].join("\n");
-}
-
-async function handleText(text, fromUser, config, args) {
+async function handleText(text, fromUser, config) {
   const command = parseCommand(text);
-  switch (command.type) {
-    case "yes":
-      return acceptPendingAction(fromUser, config);
-    case "no":
-      return rejectPendingAction(fromUser);
-    case "list":
-      return formatList(fromUser);
-    case "help":
-      return formatHelp(fromUser);
-    case "focus-status": {
-      const focused = getFocusedTask(fromUser);
-      return focused
-        ? `Focused task: ${focused.id} [${focused.status}]\nCwd: ${focused.cwd}\nPlain messages append to this task.`
-        : "No focused task. Plain messages create a new pending task.";
-    }
-    case "focus":
-      return setFocusedTask(fromUser, command.target).message;
-    case "unfocus":
-      return clearFocusedTask(fromUser);
-    case "confirm": {
-      const result = startTaskFromPending(command.id, command.cwd, config);
-      return result.message;
-    }
-    case "cancel":
-      return cancelPending(command.id)
-        ? `Canceled pending task ${command.id}.`
-        : `No pending task matches ${command.id}.`;
-    case "append": {
-      const result = appendInstruction(command.target, command.instruction, config);
-      return result.message;
-    }
-    case "new": {
-      if (!command.intent) return "Send a task instruction, or use list / append <task-id> <instruction>.";
-      const request = createPendingTask(command.intent, fromUser, config, args);
-      return formatProposal(request);
-    }
-    case "message": {
-      if (!command.text) return formatHelp(fromUser);
-      const revision = revisePendingAction(command.text, fromUser, config, args);
-      if (revision) return revision;
-      const request = planNaturalMessage(command.text, fromUser, config, args);
-      return formatProposal(request);
-    }
-    default:
-      return formatHelp(fromUser);
-  }
+  if (command.type === "list") return formatList(fromUser);
+  if (command.type === "switch") return setCurrentTask(fromUser, command.id).message;
+
+  const task = getCurrentTask(fromUser);
+  if (!task) return "task 0: 状态异常，未找到默认任务。";
+  return forwardToTask(task, command.text, config, fromUser);
 }
 
 async function runOnce(args, config) {
   const text = valueFrom(args.message, args._.join(" "));
   if (!text) throw new Error("Missing --message for --once.");
-  const response = await handleText(text, "local", config, args);
+  const response = await handleText(text, "local", config);
   process.stdout.write(`${response}\n`);
-}
-
-async function runLocalAppend(args, config) {
-  const target = valueFrom(args.target, args._[0]);
-  const instruction = valueFrom(args.instruction, args._.slice(1).join(" "));
-  if (!target || !instruction) throw new Error("Usage: --append --target <task-or-pid> --instruction <text>");
-  const result = appendInstruction(target, instruction, config);
-  process.stdout.write(`${result.message}\n`);
 }
 
 async function runPoll(args, config) {
   let sync = loadCommandSync();
-  process.stdout.write("Listening for Weixin Codex commands. Send 'list' to see tasks.\n");
+  process.stdout.write("Listening for Weixin Codex tasks. Send 'list' or 'task 0'.\n");
 
   while (true) {
     const updates = await getUpdates(config, sync);
@@ -1749,7 +1032,7 @@ async function runPoll(args, config) {
         if (!text) continue;
         rememberRecipientContext(config, message, sync);
         const replyTarget = getReplyTarget(message, config);
-        const response = await handleText(text, replyTarget, config, args);
+        const response = await handleText(text, replyTarget, config);
         await sendText(response, {
           ...config,
           toUser: replyTarget || config.toUser,
@@ -1767,6 +1050,7 @@ async function runPoll(args, config) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig(args);
+  saveTasks(loadTasks());
 
   if (args["complete-task"] === "true") {
     await completeTask({
@@ -1780,10 +1064,6 @@ async function main() {
   }
   if (args.list === "true") {
     process.stdout.write(`${await formatList()}\n`);
-    return;
-  }
-  if (args.append === "true") {
-    await runLocalAppend(args, config);
     return;
   }
   if (args.once === "true") {

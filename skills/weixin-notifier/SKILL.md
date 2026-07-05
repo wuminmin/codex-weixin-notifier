@@ -5,7 +5,7 @@ description: Configure and test Codex Weixin notifications and Weixin-driven tas
 
 # Weixin Notifier
 
-Use this skill when the user wants Codex to pair Weixin by QR code, notify Weixin after a task finishes, start Codex work from Weixin, list active tasks/processes, or append instructions to a Weixin-managed Codex task.
+Use this skill when the user wants Codex to pair Weixin by QR code, notify Weixin after a task finishes, start Codex work from Weixin, list numbered tasks, or switch the current Weixin-managed Codex task.
 
 ## Design
 
@@ -13,7 +13,7 @@ The plugin separates the completion event from the Weixin transport:
 
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
 - `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks.
-- `scripts/weixin-command-router.mjs` listens for inbound Weixin text commands, proposes a working directory before starting a task, records task state, lists tasks/processes, and appends follow-up instructions to registered tasks.
+- `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N`, and forwards ordinary text to the selected task.
 - Each notification carries a `sessionId`, `source`, `workspace`, `task`, `status`, and completion time.
 - Multiple Codex processes are separated by an explicit session id when available; otherwise the sender derives a short id from process and workspace context.
 - Secrets are read from `~/.codex/weixin-notifier.json` or environment variables, never from prompts.
@@ -64,18 +64,21 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs
 
 Supported inbound Weixin commands:
 
-- `list`, `任务`, `列表`, `进程`: list registered active tasks, pending confirmations, and visible Codex processes.
-- `new <task>` or `开始任务 <task>`: create a pending task and propose a working directory from the task intent.
-- `confirm <request-id>` or `确认 <request-id>`: start the pending task in the proposed working directory.
-- `dir <request-id> <path>` or `目录 <request-id> <path>`: start the pending task in an explicit working directory.
-- `append <task-id-or-pid> <instruction>` or `追加 <task-id-or-pid> <instruction>`: append an instruction to a registered task or external Codex pid. Running registered tasks queue the instruction and resume after the current turn finishes.
-- `cancel <request-id>` or `取消 <request-id>`: discard a pending task.
+- `list`: list numbered tasks.
+- `task 0`, `task 1`, `task 2`: switch the current Codex task for that Weixin sender.
+- Any other text: forward to the current task.
 
 Important behavior:
 
-- A Weixin-created task must be confirmed before execution. The first response always contains the proposed working directory and confirmation commands.
-- Append tracking is most precise for tasks started by `weixin-command-router.mjs`, because those tasks are registered in `~/.codex/weixin-notifier/tasks.json`.
-- External Codex pids can be targeted; the router starts a registered follow-up in the process cwd with `codex exec resume --last`. It does not inject text into arbitrary terminals.
+- `task 0` is the default Codex assistant and always exists.
+- `task 1`, `task 2`, and later tasks are created only by `task 0`.
+- The router does not interpret natural language. It only handles exact `list` and `task N` commands, tracks the current task, starts Codex processes, and forwards messages.
+- Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
+- `task 0` may create a subtask by emitting this internal JSON object on its own line:
+
+```json
+{"type":"create_task","cwd":"/absolute/workdir","prompt":"the full task instruction"}
+```
 
 Local command-router smoke checks:
 
@@ -83,7 +86,7 @@ Local command-router smoke checks:
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
-  --message "new codex-weixin-notifier add smoke test marker"
+  --message "list"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs --list
 ```
