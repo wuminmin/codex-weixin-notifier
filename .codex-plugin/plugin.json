@@ -1,0 +1,28 @@
+{
+  "name": "codex-weixin-notifier",
+  "version": "0.1.0+codex.20260705034349",
+  "description": "Send Weixin notifications and accept Weixin commands for Codex tasks.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Weixin Notifier",
+    "shortDescription": "Notify Weixin and route Weixin task commands.",
+    "longDescription": "Adds a local Weixin/iLink workflow for Codex notifications plus Weixin-driven task start, working-directory confirmation, task/process listing, and follow-up instruction routing.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Notify",
+      "Automation",
+      "Commands",
+      "Task Management"
+    ],
+    "defaultPrompt": [
+      "Help me configure Weixin completion notifications.",
+      "Send a test Codex completion notification.",
+      "Start the Weixin command router for Codex tasks."
+    ],
+    "brandColor": "#18A058"
+  }
+}
