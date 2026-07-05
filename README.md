@@ -96,6 +96,7 @@ Send these messages to the paired Weixin bot:
 list
 task 0
 task 1
+close task 1
 pwd
 ls
 ls /path/to/project
@@ -110,11 +111,21 @@ list
 task 0
 task 1
 task 2
+close task 1
+关闭 task 1 task 2
 pwd
 ls
 ```
 
-`task 0` is the default Codex assistant and always exists. `task 1`, `task 2`, and later tasks are subtasks created by `task 0`. The router handles exact `list` and `task N` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+`task 0` is the default Codex assistant and always exists. `task 1`, `task 2`, and later tasks are subtasks created by `task 0`. The router handles exact `list`, `task N`, and `close task N` / `关闭 task N` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+
+`close`, `stop`, `kill`, `关闭`, and `停止` accept one or more task numbers and close by the Weixin-visible task id. `task 0` is protected and cannot be closed:
+
+```text
+close task 1
+close task 1 task 2
+停止 task 2
+```
 
 Replies are prefixed with the task id:
 
@@ -150,6 +161,11 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "list"
+
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --once \
+  --dry-run \
+  --message "close task 999"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs --list
 ```

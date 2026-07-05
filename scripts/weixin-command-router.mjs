@@ -416,6 +416,7 @@ function taskHeader(taskId, text) {
 
 function taskStatusText(status) {
   if (status === "completed") return "完成";
+  if (status === "closed") return "已关闭";
   if (status === "failed") return "失败";
   if (status === "running") return "运行中";
   if (status === "queued") return "排队中";
@@ -853,6 +854,17 @@ function tmuxHasSession(sessionName) {
   if (!sessionName) return false;
   const result = spawnSync("tmux", ["has-session", "-t", sessionName], { stdio: "ignore" });
   return result.status === 0;
+}
+
+function killTmuxSession(sessionName) {
+  if (!sessionName || !tmuxHasSession(sessionName)) return false;
+  const result = spawnSync("tmux", ["kill-session", "-t", sessionName], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(`tmux kill-session failed: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+  }
+  return true;
 }
 
 function getTmuxPanePid(sessionName) {
@@ -1312,6 +1324,77 @@ function forwardToTask(task, text, config, fromUser = "") {
   return taskHeader(updated.id, "处理中");
 }
 
+function closeTaskTargets(targets, fromUser = "", options = {}) {
+  const ids = [...new Set(targets.map((target) => String(target).trim()).filter(Boolean))];
+  if (ids.length === 0) return "没有指定要关闭的 task。用法：close task 1";
+
+  const lines = [];
+  for (const id of ids) {
+    const task = findTaskByTarget(id);
+    if (!task) {
+      lines.push(`task ${id} · 不存在`);
+      continue;
+    }
+    if (String(task.id) === DEFAULT_TASK_ID) {
+      lines.push("task 0 · 默认任务不能关闭");
+      continue;
+    }
+
+    if (options.dryRun) {
+      lines.push([
+        taskHeader(task.id, "将关闭"),
+        `会话: ${task.tmuxSession || task.pid || "未记录"}`,
+        `目录: ${task.cwd}`,
+      ].join("\n"));
+      continue;
+    }
+
+    let killed = false;
+    try {
+      if (task.runner === "tmux" || task.tmuxSession) {
+        killed = killTmuxSession(task.tmuxSession);
+      } else if (runtimeChildren.has(String(task.id))) {
+        runtimeChildren.get(String(task.id)).kill("SIGTERM");
+        runtimeChildren.delete(String(task.id));
+        killed = true;
+      } else if (task.pid) {
+        try {
+          process.kill(Number(task.pid), "SIGTERM");
+          killed = true;
+        } catch {
+          killed = false;
+        }
+      }
+    } catch (error) {
+      lines.push(`task ${task.id} · 关闭失败\n${error.message}`);
+      continue;
+    }
+
+    const closedAt = new Date().toISOString();
+    updateTask(task.id, (current) => ({
+      ...current,
+      status: "closed",
+      closedAt,
+      updatedAt: closedAt,
+      pendingInstructions: [],
+      signal: "closed-by-user",
+      tmuxClosed: Boolean(killed),
+    }));
+
+    const current = getCurrentTask(fromUser);
+    if (String(current?.id) === String(task.id)) {
+      setCurrentTask(fromUser, DEFAULT_TASK_ID);
+    }
+
+    lines.push([
+      taskHeader(task.id, "已关闭"),
+      killed ? "会话: 已停止" : "会话: 未运行或已不存在",
+      `目录: ${task.cwd}`,
+    ].join("\n"));
+  }
+  return lines.join("\n\n");
+}
+
 function pruneDeadTasks() {
   const state = loadTasks();
   let changed = false;
@@ -1364,6 +1447,11 @@ async function formatList(fromUser = "") {
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
   if (/^list$/iu.test(trimmed)) return { type: "list" };
+  const closeMatch = trimmed.match(/^(?:close|stop|kill|关闭|停止)\s+(.+)$/iu);
+  if (closeMatch) {
+    const targets = [...closeMatch[1].matchAll(/(?:task\s*)?(\d+)/giu)].map((match) => match[1]);
+    return { type: "close", targets };
+  }
   const taskMatch = trimmed.match(/^task\s+(\d+)$/iu);
   if (taskMatch) return { type: "switch", id: taskMatch[1] };
   return { type: "message", text: trimmed };
@@ -1372,6 +1460,7 @@ function parseCommand(text) {
 async function handleText(text, fromUser, config) {
   const command = parseCommand(text);
   if (command.type === "list") return formatList(fromUser);
+  if (command.type === "close") return closeTaskTargets(command.targets, fromUser, { dryRun: Boolean(config.dryRun) });
   if (command.type === "switch") return setCurrentTask(fromUser, command.id).message;
 
   const task = getCurrentTask(fromUser);
@@ -1419,6 +1508,7 @@ async function runPoll(args, config) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig(args);
+  config.dryRun = isDryRun(args, config);
 
   if (args["send-media"]) {
     await sendTextWithMedia(`${args.message || ""}\nMEDIA:${args["send-media"]}`.trim(), config, args);
