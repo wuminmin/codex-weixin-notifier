@@ -97,6 +97,7 @@ list
 task 0
 task 1
 task close 1
+task reset 1
 task alias 1 godot
 task godot
 task tmux clean
@@ -115,6 +116,7 @@ task 0
 task 1
 task 2
 task close 1
+task reset 1
 task alias 1 godot
 task godot
 task unalias godot
@@ -123,7 +125,7 @@ pwd
 ls
 ```
 
-`task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task alias N name`, `task name`, and `task tmux clean` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+`task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, and `task tmux clean` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
 Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create `~/codex/task3`, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
 
@@ -132,6 +134,13 @@ Task ids are monotonic and are never deleted or reused. If the next id is `3`, `
 ```text
 task close 1
 task close 1 godot
+```
+
+`task reset` accepts one or more task ids or aliases. It clears Codex resume state so the next message starts a fresh Codex session in the same fixed task directory. It does not delete files, aliases, task ids, logs, or `~/codex/taskN` content. Running tasks must be closed first:
+
+```text
+task close 1
+task reset 1
 ```
 
 tmux task sessions are fixed by task id:
@@ -178,6 +187,11 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task close 999"
+
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --once \
+  --dry-run \
+  --message "task reset 1"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \

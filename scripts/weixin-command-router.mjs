@@ -503,6 +503,66 @@ function unsetTaskAlias(target, options = {}) {
   return [`task ${updated.id} · 已移除别名`, `原别名: ${oldAlias}`].join("\n");
 }
 
+function resetTaskTargets(targets, options = {}) {
+  const ids = targets.map((target) => String(target).trim()).filter(Boolean);
+  if (ids.length === 0) return "没有指定要 reset 的 task。用法：task reset 1";
+
+  const lines = [];
+  const seenTaskIds = new Set();
+  for (const id of ids) {
+    const task = findTaskByTarget(id);
+    if (!task) {
+      lines.push(`task ${id} · 不存在`);
+      continue;
+    }
+    if (seenTaskIds.has(String(task.id))) continue;
+    seenTaskIds.add(String(task.id));
+
+    if (isTaskActive(task)) {
+      lines.push([
+        taskHeader(task.id, "不能 reset"),
+        `状态: ${task.status}`,
+        `先执行: task close ${task.id}`,
+      ].join("\n"));
+      continue;
+    }
+
+    if (options.dryRun) {
+      lines.push([
+        taskHeader(task.id, "将 reset"),
+        `目录: ${task.cwd}`,
+        "会清除: codexSessionId/resumeOf/resumeLast/pendingInstructions/pid/tmuxSession/runId",
+      ].join("\n"));
+      continue;
+    }
+
+    const resetAt = new Date().toISOString();
+    const updated = updateTask(task.id, (current) => ({
+      ...current,
+      status: String(current.id) === DEFAULT_TASK_ID ? "default" : "ready",
+      pendingInstructions: [],
+      codexSessionId: "",
+      resumeOf: "",
+      resumeLast: false,
+      pid: "",
+      tmuxSession: "",
+      tmuxAttach: "",
+      tmuxPanePid: "",
+      runId: "",
+      signal: "reset-by-user",
+      resetAt,
+      updatedAt: resetAt,
+    }));
+
+    lines.push([
+      taskHeader(updated.id, "已 reset"),
+      `状态: ${updated.status}`,
+      `目录: ${updated.cwd}`,
+    ].join("\n"));
+  }
+  return lines.join("\n\n");
+}
+
 function createId(prefix) {
   const stamp = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
   const suffix = crypto.randomBytes(3).toString("hex");
@@ -1593,6 +1653,11 @@ function parseCommand(text) {
   if (aliasMatch) return { type: "alias", target: aliasMatch[1], alias: aliasMatch[2] };
   const unaliasMatch = trimmed.match(/^task\s+unalias\s+(\S+)$/iu);
   if (unaliasMatch) return { type: "unalias", target: unaliasMatch[1] };
+  const resetMatch = trimmed.match(/^task\s+reset\s+(.+)$/iu);
+  if (resetMatch) {
+    const targets = resetMatch[1].split(/\s+/u).filter(Boolean);
+    return { type: "reset", targets };
+  }
   const closeMatch = trimmed.match(/^task\s+close\s+(.+)$/iu);
   if (closeMatch) {
     const targets = closeMatch[1].split(/\s+/u).filter(Boolean);
@@ -1609,6 +1674,7 @@ async function handleText(text, fromUser, config) {
   if (command.type === "tmux-clean") return cleanupLegacyTaskTmuxSessions({ dryRun: Boolean(config.dryRun) });
   if (command.type === "alias") return setTaskAlias(command.target, command.alias, { dryRun: Boolean(config.dryRun) });
   if (command.type === "unalias") return unsetTaskAlias(command.target, { dryRun: Boolean(config.dryRun) });
+  if (command.type === "reset") return resetTaskTargets(command.targets, { dryRun: Boolean(config.dryRun) });
   if (command.type === "close") return closeTaskTargets(command.targets, fromUser, { dryRun: Boolean(config.dryRun) });
   if (command.type === "enter") return enterTask(command.target, fromUser, { dryRun: Boolean(config.dryRun) });
 

@@ -71,6 +71,7 @@ Supported inbound Weixin commands:
 - `list`: list numbered tasks.
 - `task 0`, `task 1`, `task 2`: enter an existing task, or create the next numeric task in order.
 - `task close 1`, `task close godot`: close one or more non-default tasks by id or alias.
+- `task reset 1`, `task reset godot`: clear Codex resume/session state for a non-running task without deleting files, aliases, logs, ids, or the fixed task directory.
 - `task alias 1 godot`, `task unalias godot`, `task godot`: set, remove, or enter a task alias.
 - `task tmux clean`: remove old per-run tmux sessions from before fixed task session names.
 - `pwd`, `ls`, `ls /path`, `ls -la /path`: run simple WSL directory commands in the current task cwd and return output with line breaks preserved.
@@ -83,6 +84,7 @@ Important behavior:
 - `task 0` cannot be closed from Weixin; close commands only apply to task 1 and later.
 - Task ids are monotonic and must be created one at a time; ids are not deleted or reused.
 - `task 0` does not create other tasks. New tasks are created only by explicit `task N` commands.
+- `task reset ...` refuses running, starting, or queued tasks; close them first with `task close ...`.
 - tmux runner sessions are fixed by task id, such as `codex-wx-task-0` and `codex-wx-task-1`; completed runs close by default unless `CODEX_WEIXIN_KEEP_TMUX_OPEN=1` or `keepTmuxOpen: true` is set.
 - `task tmux clean` only removes legacy per-run sessions named like `codex-wx-task-1-wxrun-...` or `codex-wx-task-1-wxr-...`; it does not remove `codex-wx-router` or fixed task sessions.
 - The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.
@@ -101,6 +103,11 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task close 999"
+
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --once \
+  --dry-run \
+  --message "task reset 1"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
