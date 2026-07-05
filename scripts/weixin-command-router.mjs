@@ -5,7 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
 const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
@@ -14,6 +15,9 @@ const TASKS_PATH = `${STATE_DIR}/tasks.json`;
 const PENDING_PATH = `${STATE_DIR}/pending.json`;
 const SYNC_PATH = `${STATE_DIR}/command-sync.json`;
 const LOG_DIR = `${STATE_DIR}/logs`;
+const FOCUS_PATH = `${STATE_DIR}/focus.json`;
+const COMPAT_SYNC_PATH = "~/.codex/channels/wechat/sync_buf.json";
+const COMPAT_CONTEXT_TOKENS_PATH = "~/.codex/channels/wechat/context_tokens.json";
 const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
 const DEFAULT_TIMEOUT_MS = 35_000;
 const LOOP_DELAY_MS = 1000;
@@ -23,6 +27,8 @@ const MESSAGE_STATE_FINISH = 2;
 const MESSAGE_ITEM_TEXT = 1;
 const ILINK_APP_ID = "bot";
 const ILINK_APP_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 6);
+const DEFAULT_RUNNER = "tmux";
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
 
 const runtimeChildren = new Map();
 
@@ -81,8 +87,31 @@ function appendTextFile(filePath, text) {
   fs.appendFileSync(resolved, text, "utf8");
 }
 
+function writeTextFile(filePath, text) {
+  const resolved = expandHome(filePath);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  fs.writeFileSync(resolved, text, "utf8");
+  return resolved;
+}
+
 function valueFrom(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
+}
+
+function splitWords(value) {
+  return String(value || "").split(/\s+/).filter(Boolean);
+}
+
+function shQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function commandExists(command) {
+  if (!command) return false;
+  const result = spawnSync("sh", ["-lc", `command -v ${shQuote(command)} >/dev/null 2>&1`], {
+    stdio: "ignore",
+  });
+  return result.status === 0;
 }
 
 function ensureTrailingSlash(url) {
@@ -180,6 +209,97 @@ function savePending(state) {
     requests: Array.isArray(state.requests) ? state.requests : [],
     updatedAt: new Date().toISOString(),
   });
+}
+
+function loadFocus() {
+  return readJsonFile(FOCUS_PATH, { users: {} });
+}
+
+function saveFocus(state) {
+  return writeJsonFile(FOCUS_PATH, {
+    users: state.users && typeof state.users === "object" ? state.users : {},
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function focusKey(fromUser) {
+  return String(fromUser || "local");
+}
+
+function getFocusedTask(fromUser) {
+  const state = loadFocus();
+  const entry = state.users?.[focusKey(fromUser)];
+  if (!entry?.target) return null;
+  const task = findTaskByTarget(entry.target);
+  if (!task) {
+    delete state.users[focusKey(fromUser)];
+    saveFocus(state);
+    return null;
+  }
+  return task;
+}
+
+function setFocusedTask(fromUser, target) {
+  const task = findTaskByTarget(target);
+  if (!task) return { ok: false, message: `No task matches ${target}. Use list to see recent task ids.` };
+  const state = loadFocus();
+  state.users[focusKey(fromUser)] = {
+    target: task.id,
+    setAt: new Date().toISOString(),
+  };
+  saveFocus(state);
+  return {
+    ok: true,
+    task,
+    message: [
+      `Focused task ${task.id}`,
+      `Status: ${task.status}`,
+      `Cwd: ${task.cwd}`,
+      "Plain messages will append to this task. Use unfocus to return plain messages to new-task mode.",
+    ].join("\n"),
+  };
+}
+
+function clearFocusedTask(fromUser) {
+  const state = loadFocus();
+  const key = focusKey(fromUser);
+  const existed = Boolean(state.users?.[key]);
+  delete state.users[key];
+  saveFocus(state);
+  return existed ? "Cleared focused task." : "No focused task was set.";
+}
+
+function loadCommandSync() {
+  const commandSync = readJsonFile(SYNC_PATH, {});
+  if (commandSync.get_updates_buf) return commandSync.get_updates_buf;
+  return readJsonFile(COMPAT_SYNC_PATH, {}).get_updates_buf || "";
+}
+
+function rememberRecipientContext(config, message, sync) {
+  const replyTarget = getReplyTarget(message, config);
+  const contextToken = message?.context_token;
+  if (!replyTarget || !contextToken) return;
+
+  const updated = {
+    ...readJsonFile(config.configPath, {}),
+    toUser: replyTarget,
+    contextToken,
+    boundFromUser: message.from_user_id,
+    boundGroup: message.group_id,
+    boundMessageId: message.message_id,
+    boundText: extractText(message),
+    boundAt: new Date().toISOString(),
+  };
+  writeJsonFile(config.configPath, updated);
+  config.toUser = replyTarget;
+  config.contextToken = contextToken;
+
+  const contextTokens = readJsonFile(COMPAT_CONTEXT_TOKENS_PATH, {});
+  contextTokens[replyTarget] = contextToken;
+  if (message.from_user_id) contextTokens[message.from_user_id] = contextToken;
+  writeJsonFile(COMPAT_CONTEXT_TOKENS_PATH, contextTokens);
+
+  writeJsonFile(COMPAT_SYNC_PATH, { get_updates_buf: sync || "", updatedAt: new Date().toISOString() });
 }
 
 function createId(prefix) {
@@ -438,19 +558,52 @@ function extractSessionId(value) {
   return "";
 }
 
-function buildCodexArgs({ prompt, cwd, outputLastMessage, config, resumeSessionId, resumeLast = false }) {
+function codexArgGroups(config) {
+  const configuredGlobal = Array.isArray(config.codexGlobalArgs)
+    ? config.codexGlobalArgs
+    : splitWords(process.env.CODEX_WEIXIN_CODEX_GLOBAL_ARGS);
   const configured = Array.isArray(config.codexArgs)
     ? config.codexArgs
-    : String(process.env.CODEX_WEIXIN_CODEX_ARGS || "").split(/\s+/).filter(Boolean);
-  const defaults = configured.length
-    ? configured
-    : ["--json", "--skip-git-repo-check", "--ask-for-approval", "never"];
+    : splitWords(process.env.CODEX_WEIXIN_CODEX_ARGS);
+  const globalArgs = [...configuredGlobal];
+  const execArgs = [];
+
+  for (let i = 0; i < configured.length; i += 1) {
+    const arg = configured[i];
+    if (arg.startsWith("--ask-for-approval=") || arg.startsWith("-a=")) {
+      globalArgs.push(arg);
+      continue;
+    }
+    if (arg === "--ask-for-approval" || arg === "-a") {
+      globalArgs.push(arg);
+      if (configured[i + 1]) {
+        globalArgs.push(configured[i + 1]);
+        i += 1;
+      }
+      continue;
+    }
+    execArgs.push(arg);
+  }
+
+  if (!globalArgs.length && !execArgs.length) {
+    return {
+      globalArgs: ["--ask-for-approval", "never"],
+      execArgs: ["--json", "--skip-git-repo-check"],
+    };
+  }
+
+  return { globalArgs, execArgs };
+}
+
+function buildCodexArgs({ prompt, cwd, outputLastMessage, config, resumeSessionId, resumeLast = false }) {
+  const { globalArgs, execArgs } = codexArgGroups(config);
 
   if (resumeSessionId || resumeLast) {
     return [
+      ...globalArgs,
       "exec",
       "resume",
-      ...defaults,
+      ...execArgs,
       "-o",
       outputLastMessage,
       ...(resumeSessionId ? [resumeSessionId] : ["--last"]),
@@ -459,14 +612,119 @@ function buildCodexArgs({ prompt, cwd, outputLastMessage, config, resumeSessionI
   }
 
   return [
+    ...globalArgs,
     "exec",
-    ...defaults,
+    ...execArgs,
     "-C",
     cwd,
     "-o",
     outputLastMessage,
     prompt,
   ];
+}
+
+function selectedRunner(config) {
+  const requested = valueFrom(process.env.CODEX_WEIXIN_RUNNER, config.runner, DEFAULT_RUNNER);
+  const normalized = String(requested).toLowerCase();
+  if (normalized === "spawn" || normalized === "direct") return "spawn";
+  if (normalized === "tmux" && commandExists("tmux")) return "tmux";
+  return "spawn";
+}
+
+function sanitizeTmuxName(value) {
+  return String(value || "codex-wx")
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "codex-wx";
+}
+
+function makeTmuxSessionName(task, runId) {
+  return sanitizeTmuxName(`codex-wx-${task.id}-${runId}`);
+}
+
+function tmuxHasSession(sessionName) {
+  if (!sessionName) return false;
+  const result = spawnSync("tmux", ["has-session", "-t", sessionName], { stdio: "ignore" });
+  return result.status === 0;
+}
+
+function getTmuxPanePid(sessionName) {
+  if (!sessionName) return "";
+  const result = spawnSync("tmux", ["display-message", "-p", "-t", sessionName, "#{pane_pid}"], {
+    encoding: "utf8",
+  });
+  return result.status === 0 ? result.stdout.trim() : "";
+}
+
+function startTmuxRun({ task, prompt, config, resumeSessionId = "", resumeLast = false, command, args, runId, stdoutPath, stderrPath, lastMessagePath }) {
+  const sessionName = makeTmuxSessionName(task, runId);
+  const shell = valueFrom(process.env.SHELL, "/bin/bash");
+  const envPrefix = [
+    ["CODEX_SESSION_ID", task.id],
+    ["CODEX_PRODUCT", "codex-weixin-command-router"],
+  ].map(([key, value]) => `${key}=${shQuote(value)}`).join(" ");
+  const codexLine = [
+    envPrefix,
+    shQuote(command),
+    ...args.map(shQuote),
+  ].filter(Boolean).join(" ");
+  const completionLine = [
+    shQuote(process.execPath),
+    shQuote(SCRIPT_PATH),
+    "--complete-task",
+    "--task-id",
+    shQuote(task.id),
+    "--run-id",
+    shQuote(runId),
+    "--exit-code",
+    '"$code"',
+    "--config",
+    shQuote(config.configPath),
+    ">>",
+    shQuote(stderrPath),
+    "2>&1",
+  ].join(" ");
+  const script = [
+    "set -u",
+    `cd ${shQuote(task.cwd)} || exit 127`,
+    `: > ${shQuote(stdoutPath)}`,
+    `: > ${shQuote(stderrPath)}`,
+    `printf '%s\\n' ${shQuote(`Codex Weixin task ${task.id}`)}`,
+    `printf '%s\\n' ${shQuote(`cwd: ${task.cwd}`)}`,
+    `printf '%s\\n' ${shQuote(`logs: ${stdoutPath}`)}`,
+    `${codexLine} > >(tee -a ${shQuote(stdoutPath)}) 2> >(tee -a ${shQuote(stderrPath)} >&2)`,
+    "code=$?",
+    completionLine,
+    `printf '\\n[Codex Weixin task ${task.id} finished with exit %s.]\\n' "$code"`,
+    "printf '[Attach remains open for inspection. Press Ctrl-D to close.]\\n'",
+    `exec ${shQuote(shell)} -l`,
+  ].join("\n");
+
+  const tmux = spawnSync("tmux", ["new-session", "-d", "-s", sessionName, "-c", task.cwd, "/bin/bash", "-lc", script], {
+    encoding: "utf8",
+  });
+  if (tmux.status !== 0) {
+    throw new Error(`tmux start failed: ${tmux.stderr || tmux.stdout || `exit ${tmux.status}`}`);
+  }
+
+  const panePid = getTmuxPanePid(sessionName);
+  updateTask(task.id, (current) => ({
+    ...current,
+    status: "running",
+    runner: "tmux",
+    tmuxSession: sessionName,
+    tmuxAttach: `tmux attach -t ${sessionName}`,
+    tmuxPanePid: panePid,
+    pid: panePid || current.pid,
+    runId,
+    startedAt: current.startedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    logs: { stdout: stdoutPath, stderr: stderrPath, lastMessage: lastMessagePath },
+    resumeOf: resumeSessionId || current.resumeOf || "",
+    resumeLast: Boolean(resumeLast || current.resumeLast),
+  }));
+
+  return { pid: panePid, tmuxSession: sessionName, stdoutPath, stderrPath, lastMessagePath };
 }
 
 function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast = false }) {
@@ -486,6 +744,22 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
     resumeLast,
   });
 
+  if (selectedRunner(config) === "tmux") {
+    return startTmuxRun({
+      task,
+      prompt,
+      config,
+      resumeSessionId,
+      resumeLast,
+      command,
+      args,
+      runId,
+      stdoutPath,
+      stderrPath,
+      lastMessagePath,
+    });
+  }
+
   const child = spawn(command, args, {
     cwd: task.cwd,
     env: {
@@ -497,12 +771,13 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
   });
 
   runtimeChildren.set(task.id, child);
-  appendTextFile(stdoutPath, "");
-  appendTextFile(stderrPath, "");
+  writeTextFile(stdoutPath, "");
+  writeTextFile(stderrPath, "");
 
   updateTask(task.id, (current) => ({
     ...current,
     status: "running",
+    runner: "spawn",
     pid: child.pid,
     runId,
     startedAt: current.startedAt || new Date().toISOString(),
@@ -539,50 +814,8 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
 
   child.on("exit", async (code, signal) => {
     runtimeChildren.delete(task.id);
-    const finishedAt = new Date().toISOString();
-    const latest = updateTask(task.id, (current) => ({
-      ...current,
-      status: code === 0 ? "completed" : "failed",
-      exitCode: code,
-      signal,
-      finishedAt,
-      updatedAt: finishedAt,
-    }));
-
-    if (!latest) return;
-    const pending = Array.isArray(latest.pendingInstructions) ? latest.pendingInstructions : [];
-    if (pending.length > 0) {
-      const nextInstruction = pending.shift();
-      const updated = updateTask(task.id, (current) => ({
-        ...current,
-        pendingInstructions: pending,
-        status: "queued",
-        updatedAt: new Date().toISOString(),
-      }));
-      if (updated) {
-        startCodexRun({
-          task: updated,
-          prompt: formatAppendPrompt(updated, nextInstruction),
-          config,
-          resumeSessionId: updated.codexSessionId || "",
-          resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
-        });
-      }
-      return;
-    }
-
     try {
-      const last = readLastMessage(latest);
-      await sendText(
-        [
-          `Task ${latest.id} ${latest.status}`,
-          `Exit: ${code === null ? signal : code}`,
-          `Cwd: ${latest.cwd}`,
-          last ? "" : null,
-          last ? compact(last, 1200) : null,
-        ].filter(Boolean).join("\n"),
-        config,
-      );
+      await completeTask({ taskId: task.id, runId, exitCode: code, signal, config });
     } catch (error) {
       appendTextFile(stderrPath, `\n[notify-error] ${error.stack || error.message}\n`);
     }
@@ -611,6 +844,83 @@ function readLastMessage(task) {
   }
 }
 
+function extractSessionIdFromJsonl(filePath) {
+  if (!filePath) return "";
+  try {
+    const text = fs.readFileSync(filePath, "utf8");
+    let found = "";
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const sessionId = extractSessionId(JSON.parse(line));
+        if (sessionId) found = sessionId;
+      } catch {
+        // Ignore non-JSON terminal output.
+      }
+    }
+    return found;
+  } catch {
+    return "";
+  }
+}
+
+async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
+  const numericExit = exitCode === null || exitCode === undefined || exitCode === ""
+    ? null
+    : Number(exitCode);
+  const finishedAt = new Date().toISOString();
+  const latest = updateTask(taskId, (current) => {
+    const codexSessionId = current.codexSessionId || extractSessionIdFromJsonl(current.logs?.stdout);
+    return {
+      ...current,
+      status: numericExit === 0 ? "completed" : "failed",
+      exitCode: numericExit,
+      signal,
+      codexSessionId,
+      finishedAt,
+      updatedAt: finishedAt,
+    };
+  });
+
+  if (!latest) return null;
+  const pending = Array.isArray(latest.pendingInstructions) ? [...latest.pendingInstructions] : [];
+  if (pending.length > 0) {
+    const nextInstruction = pending.shift();
+    const updated = updateTask(latest.id, (current) => ({
+      ...current,
+      pendingInstructions: pending,
+      status: "queued",
+      updatedAt: new Date().toISOString(),
+    }));
+    if (updated) {
+      startCodexRun({
+        task: updated,
+        prompt: formatAppendPrompt(updated, nextInstruction),
+        config,
+        resumeSessionId: updated.codexSessionId || "",
+        resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
+      });
+    }
+    return updated;
+  }
+
+  const last = readLastMessage(latest);
+  await sendText(
+    [
+      `Task ${latest.id} ${latest.status}`,
+      `Exit: ${numericExit === null ? signal || "unknown" : numericExit}`,
+      `Runner: ${latest.runner || "spawn"}`,
+      latest.tmuxSession ? `Tmux: ${latest.tmuxSession}` : null,
+      latest.tmuxAttach ? `Attach: ${latest.tmuxAttach}` : null,
+      `Cwd: ${latest.cwd}`,
+      last ? "" : null,
+      last ? compact(last, 1200) : null,
+    ].filter(Boolean).join("\n"),
+    config,
+  );
+  return latest;
+}
+
 function formatAppendPrompt(task, instruction) {
   return [
     `Continue the existing task ${task.id}.`,
@@ -624,11 +934,13 @@ function formatAppendPrompt(task, instruction) {
 function findTaskByTarget(target) {
   const state = loadTasks();
   const normalized = String(target || "").trim();
-  const withoutPrefix = normalized.replace(/^(task|pid):/i, "");
+  const withoutPrefix = normalized.replace(/^(task|pid|tmux):/i, "");
   return state.tasks.find((task) => {
     return task.id === withoutPrefix
       || task.id.startsWith(withoutPrefix)
-      || String(task.pid || "") === withoutPrefix;
+      || String(task.pid || "") === withoutPrefix
+      || task.tmuxSession === withoutPrefix
+      || String(task.tmuxSession || "").startsWith(withoutPrefix);
   }) || null;
 }
 
@@ -680,10 +992,13 @@ function startTaskFromPending(requestId, cwdOverride, config) {
     task: { ...task, pid: run.pid },
     message: [
       `Started task ${task.id}`,
-      `PID: ${run.pid}`,
+      `Runner: ${run.tmuxSession ? "tmux" : "spawn"}`,
+      run.pid ? `PID: ${run.pid}` : null,
+      run.tmuxSession ? `Tmux: ${run.tmuxSession}` : null,
+      run.tmuxSession ? `Attach: tmux attach -t ${run.tmuxSession}` : null,
       `Cwd: ${task.cwd}`,
       `Intent: ${compact(task.intent)}`,
-    ].join("\n"),
+    ].filter(Boolean).join("\n"),
   };
 }
 
@@ -730,6 +1045,14 @@ function pruneDeadTasks() {
   let changed = false;
   for (const task of state.tasks) {
     if (!["running", "starting", "queued"].includes(task.status)) continue;
+    if (task.runner === "tmux" || task.tmuxSession) {
+      if (!tmuxHasSession(task.tmuxSession)) {
+        task.status = "unknown";
+        task.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+      continue;
+    }
     if (!task.pid) continue;
     try {
       process.kill(Number(task.pid), 0);
@@ -751,15 +1074,34 @@ function listCodexProcesses() {
     proc.on("exit", () => {
       const text = Buffer.concat(chunks).toString("utf8");
       const rows = text.split(/\r?\n/)
-        .filter((line) => {
+        .map((line) => {
           const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith("PID ")) return false;
+          if (!trimmed || trimmed.startsWith("PID ")) return null;
           const parts = trimmed.split(/\s+/, 5);
+          const pid = parts[0] || "";
+          const ppid = parts[1] || "";
+          const stat = parts[2] || "";
           const comm = parts[3] || "";
-          return comm === "codex"
-            && !/\bcodex\s+app-server\b/.test(trimmed)
-            && !trimmed.includes("weixin-command-router.mjs");
+          const command = parts[4] || "";
+          if (comm !== "codex") return null;
+          if (stat.includes("Z")) return null;
+          if (/\bcodex\s+app-server\b/.test(trimmed)) return null;
+          if (trimmed.includes("weixin-command-router.mjs")) return null;
+          let cwd = "(unavailable)";
+          try {
+            cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+          } catch {
+            // The process may exit between ps and cwd lookup.
+          }
+          return [
+            `pid=${pid}`,
+            `ppid=${ppid}`,
+            `stat=${stat}`,
+            `cwd=${cwd}`,
+            `cmd=${compact(command, 160)}`,
+          ].join(" | ");
         })
+        .filter(Boolean)
         .slice(0, 20);
       resolve(rows);
     });
@@ -767,27 +1109,46 @@ function listCodexProcesses() {
   });
 }
 
-async function formatList() {
+function formatTaskLine(task, intentMax = 100) {
+  return [
+    `${task.id} [${task.status}]`,
+    `runner=${task.runner || "spawn"}`,
+    task.tmuxSession ? `tmux=${task.tmuxSession}` : null,
+    `pid=${task.pid || "-"}`,
+    `cwd=${task.cwd}`,
+    task.finishedAt ? `finished=${task.finishedAt}` : null,
+    `intent=${compact(task.intent, intentMax)}`,
+  ].filter(Boolean).join(" | ");
+}
+
+async function formatList(fromUser = "") {
   const state = pruneDeadTasks();
   const pending = loadPending();
   const taskLines = state.tasks
     .filter((task) => ["starting", "running", "queued", "unknown"].includes(task.status))
     .slice(0, 12)
-    .map((task) => [
-      `${task.id} [${task.status}]`,
-      `pid=${task.pid || "-"}`,
-      `cwd=${task.cwd}`,
-      `intent=${compact(task.intent, 100)}`,
-    ].join(" | "));
+    .map((task) => formatTaskLine(task));
+
+  const recentLines = state.tasks
+    .filter((task) => ["completed", "failed", "canceled"].includes(task.status))
+    .sort((a, b) => String(b.finishedAt || b.updatedAt || b.createdAt).localeCompare(String(a.finishedAt || a.updatedAt || a.createdAt)))
+    .slice(0, 8)
+    .map((task) => formatTaskLine(task, 120));
 
   const pendingLines = pending.requests.slice(0, 8).map((request) => (
     `${request.id} [pending cwd] | cwd=${request.proposedCwd} | intent=${compact(request.intent, 100)}`
   ));
   const processes = await listCodexProcesses();
+  const focused = getFocusedTask(fromUser);
 
   return [
+    focused ? `Focused task: ${focused.id} [${focused.status}] | cwd=${focused.cwd}` : "Focused task: (none)",
+    "",
     "Codex Weixin tasks",
     taskLines.length ? taskLines.join("\n") : "(no active registered tasks)",
+    "",
+    "Recent completed tasks",
+    recentLines.length ? recentLines.join("\n") : "(none)",
     "",
     "Pending confirmations",
     pendingLines.length ? pendingLines.join("\n") : "(none)",
@@ -905,14 +1266,27 @@ function appendInstruction(target, instruction, config) {
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
   const listPattern = /^(list|ls|tasks|processes|任务|列表|进程)$/iu;
+  const helpPattern = /^(help|帮助|\?)$/iu;
+  const focusStatusPattern = /^(focus|焦点)$/iu;
+  const focusPattern = /^(focus|use|select|切换|选中|焦点)\s+(\S+)$/iu;
+  const unfocusPattern = /^(unfocus|clear focus|取消焦点|退出焦点)$/iu;
   const confirmPattern = /^(confirm|确认|start|开始)\s+(\S+)(?:\s+(.+))?$/iu;
   const dirPattern = /^(dir|cwd|目录|工作目录)\s+(\S+)\s+(.+)$/iu;
   const cancelPattern = /^(cancel|取消)\s+(\S+)$/iu;
-  const appendPattern = /^(append|追加|send|发)\s+(\S+)\s+([\s\S]+)$/iu;
+  const appendPattern = /^(append|追加|send|发|to|给|继续)\s+(\S+)\s+([\s\S]+)$/iu;
+  const mentionPattern = /^@(\S+)\s+([\s\S]+)$/iu;
   const newPattern = /^(new|task|开始任务|新任务)\s+([\s\S]+)$/iu;
 
   let match = trimmed.match(listPattern);
   if (match) return { type: "list" };
+  match = trimmed.match(helpPattern);
+  if (match) return { type: "help" };
+  match = trimmed.match(focusStatusPattern);
+  if (match) return { type: "focus-status" };
+  match = trimmed.match(focusPattern);
+  if (match) return { type: "focus", target: match[2] };
+  match = trimmed.match(unfocusPattern);
+  if (match) return { type: "unfocus" };
   match = trimmed.match(confirmPattern);
   if (match) return { type: "confirm", id: match[2], cwd: match[3] || "" };
   match = trimmed.match(dirPattern);
@@ -921,16 +1295,49 @@ function parseCommand(text) {
   if (match) return { type: "cancel", id: match[2] };
   match = trimmed.match(appendPattern);
   if (match) return { type: "append", target: match[2], instruction: match[3] };
+  match = trimmed.match(mentionPattern);
+  if (match) return { type: "append", target: match[1], instruction: match[2] };
   match = trimmed.match(newPattern);
   if (match) return { type: "new", intent: match[2] };
-  return { type: "new", intent: trimmed };
+  return { type: "message", text: trimmed };
+}
+
+function formatHelp(fromUser = "") {
+  const focused = getFocusedTask(fromUser);
+  return [
+    "Router commands:",
+    "list",
+    "new <task>",
+    "confirm <req-id>",
+    "dir <req-id> <cwd>",
+    "append <task-id> <instruction>",
+    "@<task-id> <instruction>",
+    "focus <task-id>",
+    "unfocus",
+    "",
+    focused
+      ? `Plain messages currently append to ${focused.id}.`
+      : "Plain messages currently create a new pending task.",
+  ].join("\n");
 }
 
 async function handleText(text, fromUser, config, args) {
   const command = parseCommand(text);
   switch (command.type) {
     case "list":
-      return formatList();
+      return formatList(fromUser);
+    case "help":
+      return formatHelp(fromUser);
+    case "focus-status": {
+      const focused = getFocusedTask(fromUser);
+      return focused
+        ? `Focused task: ${focused.id} [${focused.status}]\nCwd: ${focused.cwd}\nPlain messages append to this task.`
+        : "No focused task. Plain messages create a new pending task.";
+    }
+    case "focus":
+      return setFocusedTask(fromUser, command.target).message;
+    case "unfocus":
+      return clearFocusedTask(fromUser);
     case "confirm": {
       const result = startTaskFromPending(command.id, command.cwd, config);
       return result.message;
@@ -948,8 +1355,21 @@ async function handleText(text, fromUser, config, args) {
       const request = createPendingTask(command.intent, fromUser, config, args);
       return formatProposal(request);
     }
+    case "message": {
+      if (!command.text) return formatHelp(fromUser);
+      const focused = getFocusedTask(fromUser);
+      if (focused) {
+        const result = appendInstruction(focused.id, command.text, config);
+        return [
+          `Sent to focused task ${focused.id}.`,
+          result.message,
+        ].join("\n");
+      }
+      const request = createPendingTask(command.text, fromUser, config, args);
+      return formatProposal(request);
+    }
     default:
-      return "Unknown command. Use list, new <task>, confirm <id>, dir <id> <cwd>, append <task-id> <instruction>, or cancel <id>.";
+      return formatHelp(fromUser);
   }
 }
 
@@ -969,7 +1389,7 @@ async function runLocalAppend(args, config) {
 }
 
 async function runPoll(args, config) {
-  let sync = readJsonFile(SYNC_PATH, {}).get_updates_buf || "";
+  let sync = loadCommandSync();
   process.stdout.write("Listening for Weixin Codex commands. Send 'list' to see tasks.\n");
 
   while (true) {
@@ -977,12 +1397,22 @@ async function runPoll(args, config) {
     sync = updates.get_updates_buf || sync;
     writeJsonFile(SYNC_PATH, { get_updates_buf: sync, updatedAt: new Date().toISOString() });
     for (const message of updates.msgs || []) {
-      if (!isInboundUserMessage(message)) continue;
-      const text = extractText(message);
-      if (!text) continue;
-      const replyTarget = getReplyTarget(message, config);
-      const response = await handleText(text, replyTarget, config, args);
-      await sendText(response, { ...config, toUser: replyTarget || config.toUser }, args);
+      try {
+        if (!isInboundUserMessage(message)) continue;
+        const text = extractText(message);
+        if (!text) continue;
+        rememberRecipientContext(config, message, sync);
+        const replyTarget = getReplyTarget(message, config);
+        const response = await handleText(text, replyTarget, config, args);
+        await sendText(response, {
+          ...config,
+          toUser: replyTarget || config.toUser,
+          contextToken: message.context_token || config.contextToken,
+        }, args);
+      } catch (error) {
+        appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] ${error.stack || error.message}\n`);
+        process.stderr.write(`${error.stack || error.message}\n`);
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, Number(args.interval || LOOP_DELAY_MS)));
   }
@@ -992,6 +1422,16 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig(args);
 
+  if (args["complete-task"] === "true") {
+    await completeTask({
+      taskId: valueFrom(args["task-id"], args.task),
+      runId: args["run-id"] || "",
+      exitCode: args["exit-code"],
+      signal: args.signal || "",
+      config,
+    });
+    return;
+  }
   if (args.list === "true") {
     process.stdout.write(`${await formatList()}\n`);
     return;

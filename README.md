@@ -93,28 +93,39 @@ The router stores state in:
 Send these messages to the paired Weixin bot:
 
 ```text
+help
 list
 new add tests for codex-weixin-notifier
 confirm req-20260705041249-ac9cde
 dir req-20260705041249-ac9cde /path/to/codex-weixin-notifier
 append task-20260705041249-ac9cde also update the README
+@task-20260705041249-ac9cde also update the README
+focus task-20260705041249-ac9cde
+also add a smoke test
+unfocus
 cancel req-20260705041249-ac9cde
 ```
 
 Chinese aliases are also supported:
 
 ```text
+帮助
 列表
 开始任务 给 codex-weixin-notifier 增加一个 smoke test
 确认 req-20260705041249-ac9cde
 目录 req-20260705041249-ac9cde /path/to/codex-weixin-notifier
 追加 task-20260705041249-ac9cde 顺手更新 README
+焦点 task-20260705041249-ac9cde
+再增加一个冒烟测试
+取消焦点
 取消 req-20260705041249-ac9cde
 ```
 
+Every inbound Weixin message first goes to `weixin-command-router.mjs`. The router owns the text protocol: `list`, `help`, `new`, `confirm`, `dir`, `cancel`, `append`, `focus`, and `unfocus` are router commands. Directed messages such as `append <task-id> ...`, `@<task-id> ...`, and `给 <task-id> ...` are sent to that task. If you set `focus <task-id>`, plain messages are appended to the focused task until `unfocus`; without a focused task, plain messages create a new pending task.
+
 Every new task first becomes a pending request. The router chooses a suggested working directory from the task intent and local project metadata, then waits for `confirm` or `dir` before it starts `codex exec`.
 
-`list` shows registered active tasks, pending confirmations, and visible Codex processes. `append` can target a registered task id, an id prefix, a registered task pid, or an external Codex pid. If the target task is currently running, the instruction is queued and automatically sent with `codex exec resume` after the current turn exits. For an external Codex pid, the router starts a registered follow-up in that process cwd with `codex exec resume --last`. Arbitrary terminal injection is not attempted; start tasks through this router when you want exact task-level append tracking.
+`list` shows the focused task, registered active tasks, recent completed/failed tasks, pending confirmations, visible Codex processes, each task's working directory, and tmux session metadata when present. `append` can target a registered task id, an id prefix, a registered task pid, a registered tmux session, or an external Codex pid. If the target task is currently running, the instruction is queued and automatically sent with `codex exec resume` after the current turn exits. For a completed registered task, `append` starts a follow-up run in the same working directory and resumes the recorded Codex session when available. For an external Codex pid, the router starts a registered follow-up in that process cwd with `codex exec resume --last`. Arbitrary terminal injection is not attempted; start tasks through this router when you want exact task-level append tracking.
 
 Local smoke checks:
 
@@ -131,13 +142,23 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 
 ```json
 {
+  "runner": "tmux",
   "workspaceRoot": "/home/user/plugins:~/codex",
   "codexCommand": "codex",
-  "codexArgs": ["--json", "--skip-git-repo-check", "--ask-for-approval", "never"]
+  "codexGlobalArgs": ["--ask-for-approval", "never"],
+  "codexArgs": ["--json", "--skip-git-repo-check"]
 }
 ```
 
-`CODEX_WEIXIN_WORKSPACE_ROOT`, `CODEX_WEIXIN_CODEX_COMMAND`, and `CODEX_WEIXIN_CODEX_ARGS` can override those fields.
+`runner` defaults to `tmux` when tmux is installed, and falls back to direct `spawn` otherwise. tmux tasks keep an attachable session open after Codex exits so you can inspect the terminal:
+
+```bash
+tmux attach -t codex-wx-task-...
+```
+
+Working directory is still chosen before launch: send `confirm req-...` to accept the suggested cwd, or `dir req-... /path/to/workspace` to override it and start the tmux session there.
+
+`CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_WORKSPACE_ROOT`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override those fields.
 
 ## Completion Hook Shape
 
