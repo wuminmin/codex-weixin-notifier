@@ -165,6 +165,14 @@ codex-wx-task-2
 
 Finished task runs close their tmux session by default. Set `CODEX_WEIXIN_KEEP_TMUX_OPEN=1` or `keepTmuxOpen: true` only when you need a debug shell left open. `task tmux clean` removes old pre-fixed-session names such as `codex-wx-task-1-wxrun-...` and `codex-wx-task-1-wxr-...`.
 
+Ordinary Weixin messages use a global approval-first rule before execution. Unless the current message contains an approval phrase or a clear approval intent, the child Codex task should quickly return an intent confirmation or short plan instead of editing files, running shell commands, starting apps, installing packages, launching long-running work, or sending media. Default approval phrases:
+
+```text
+同意, 批准, 审批通过, 可以, 执行, 开始, 做吧, 继续, 按计划, ok, yes, go ahead, approve
+```
+
+Override them with `CODEX_WEIXIN_EXECUTION_APPROVAL_PHRASES` as a comma-separated list, or `executionApprovalPhrases` in `~/.codex/weixin-notifier.json`.
+
 Replies are prefixed with the task id:
 
 ```text

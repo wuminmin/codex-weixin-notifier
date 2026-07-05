@@ -37,6 +37,21 @@ const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MEDIA_TYPE_IMAGE = 1;
 const MEDIA_TYPE_FILE = 3;
 const INBOUND_MEDIA_DIR = "inbox";
+const DEFAULT_APPROVAL_PHRASES = [
+  "同意",
+  "批准",
+  "审批通过",
+  "可以",
+  "执行",
+  "开始",
+  "做吧",
+  "继续",
+  "按计划",
+  "ok",
+  "yes",
+  "go ahead",
+  "approve",
+];
 
 const EXTENSION_TO_MIME = {
   ".bmp": "image/bmp",
@@ -135,6 +150,10 @@ function valueFrom(...values) {
 
 function splitWords(value) {
   return String(value || "").split(/\s+/).filter(Boolean);
+}
+
+function splitList(value) {
+  return String(value || "").split(/[,\n]/u).map((item) => item.trim()).filter(Boolean);
 }
 
 function shQuote(value) {
@@ -1627,12 +1646,40 @@ function instructionWithAttachments(instruction, attachments = []) {
   return [text, summary].filter(Boolean).join("\n\n");
 }
 
-function formatDefaultTaskPrompt(instruction, attachments = []) {
+function approvalPhrases(config = {}) {
+  const configured = Array.isArray(config.executionApprovalPhrases)
+    ? config.executionApprovalPhrases
+    : splitList(process.env.CODEX_WEIXIN_EXECUTION_APPROVAL_PHRASES);
+  return configured.length ? configured : DEFAULT_APPROVAL_PHRASES;
+}
+
+function hasExecutionApproval(instruction, config = {}) {
+  const text = String(instruction || "").toLowerCase();
+  return approvalPhrases(config).some((phrase) => {
+    const normalized = String(phrase || "").trim();
+    return normalized && text.includes(normalized.toLowerCase());
+  });
+}
+
+function formatWeixinExecutionPolicy(instruction, config = {}) {
+  const phrases = approvalPhrases(config);
+  const approved = hasExecutionApproval(instruction, config);
+  return [
+    "Global Weixin execution policy:",
+    `- Approval required before execution. Current message approval: ${approved ? "yes" : "no"}.`,
+    `- Approval phrases: ${phrases.join(" / ")}.`,
+    "- If approval is no, do not edit files, run shell commands, start apps, install packages, launch long-running work, or send media. Reply quickly with an intent-understanding confirmation or a short plan, then ask for approval.",
+    "- If approval is yes, execute the requested work normally and keep the response concise.",
+  ].join("\n");
+}
+
+function formatDefaultTaskPrompt(instruction, attachments = [], config = {}) {
   const userInstruction = instructionWithAttachments(instruction, attachments);
   return [
     "You are task 0, the default Codex assistant behind a Weixin chat.",
     "Answer directly inside task 0. Do not create or request separate subtasks.",
     "Task creation is controlled only by explicit Weixin commands such as task 1.",
+    formatWeixinExecutionPolicy(instruction, config),
     "To send an existing local image or file to Weixin, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
     "Use MEDIA only for files that already exist and are safe to share. Keep the directive on a separate line.",
     "",
@@ -1641,14 +1688,16 @@ function formatDefaultTaskPrompt(instruction, attachments = []) {
   ].join("\n");
 }
 
-function formatAppendPrompt(task, instruction, attachments = []) {
+function formatAppendPrompt(task, instruction, attachments = [], config = {}) {
   const userInstruction = instructionWithAttachments(instruction, attachments);
-  if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction, attachments);
+  const executionPolicy = formatWeixinExecutionPolicy(instruction, config);
+  if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction, attachments, config);
   if (!task.codexSessionId && !task.resumeLast) {
     return [
       `You are Weixin-managed task ${task.id}.`,
       task.alias ? `Task alias: ${task.alias}` : null,
       `Working directory: ${task.cwd}`,
+      executionPolicy,
       "",
       "User instruction:",
       userInstruction,
@@ -1659,6 +1708,7 @@ function formatAppendPrompt(task, instruction, attachments = []) {
   return [
     `Continue the existing task ${task.id}.`,
     `Original task: ${task.intent}`,
+    executionPolicy,
     "",
     "Additional instruction from Weixin:",
     userInstruction,
@@ -1699,7 +1749,7 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
     if (updated) {
       startCodexRun({
         task: updated,
-        prompt: formatAppendPrompt(updated, nextInstruction.text, nextInstruction.attachments),
+        prompt: formatAppendPrompt(updated, nextInstruction.text, nextInstruction.attachments, config),
         config,
         resumeSessionId: updated.codexSessionId || "",
         resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
@@ -1759,7 +1809,7 @@ function forwardToTask(task, text, config, fromUser = "", attachments = []) {
   });
   startCodexRun({
     task: updated,
-    prompt: formatAppendPrompt(updated, entry.text, entry.attachments),
+    prompt: formatAppendPrompt(updated, entry.text, entry.attachments, config),
     config,
     resumeSessionId: updated.codexSessionId || "",
     resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
