@@ -136,7 +136,7 @@ task close 1
 task close 1 godot
 ```
 
-`task reset` accepts one or more task ids or aliases. It clears Codex resume state so the next message starts a fresh Codex session in the same fixed task directory. It does not delete files, aliases, task ids, logs, or `~/codex/taskN` content. Running tasks must be closed first:
+`task reset` accepts one or more task ids or aliases. It clears Codex resume state so the next message starts a fresh Codex session in the same fixed task directory. It does not delete files, aliases, task ids, historical log files, or `~/codex/taskN` content; it only clears the task's pointer to the previous run logs so old session ids cannot be restored. Running tasks must be closed first:
 
 ```text
 task close 1

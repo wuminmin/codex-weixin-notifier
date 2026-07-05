@@ -71,7 +71,7 @@ Supported inbound Weixin commands:
 - `list`: list numbered tasks.
 - `task 0`, `task 1`, `task 2`: enter an existing task, or create the next numeric task in order.
 - `task close 1`, `task close godot`: close one or more non-default tasks by id or alias.
-- `task reset 1`, `task reset godot`: clear Codex resume/session state for a non-running task without deleting files, aliases, logs, ids, or the fixed task directory.
+- `task reset 1`, `task reset godot`: clear Codex resume/session state for a non-running task without deleting files, aliases, historical log files, ids, or the fixed task directory; it also clears the task's previous run-log pointer so old session ids are not restored.
 - `task alias 1 godot`, `task unalias godot`, `task godot`: set, remove, or enter a task alias.
 - `task tmux clean`: remove old per-run tmux sessions from before fixed task session names.
 - `pwd`, `ls`, `ls /path`, `ls -la /path`: run simple WSL directory commands in the current task cwd and return output with line breaks preserved.

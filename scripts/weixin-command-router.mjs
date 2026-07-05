@@ -531,7 +531,7 @@ function resetTaskTargets(targets, options = {}) {
       lines.push([
         taskHeader(task.id, "将 reset"),
         `目录: ${task.cwd}`,
-        "会清除: codexSessionId/resumeOf/resumeLast/pendingInstructions/pid/tmuxSession/runId",
+        "会清除: codexSessionId/resumeOf/resumeLast/pendingInstructions/pid/tmuxSession/runId/log refs",
       ].join("\n"));
       continue;
     }
@@ -549,6 +549,7 @@ function resetTaskTargets(targets, options = {}) {
       tmuxAttach: "",
       tmuxPanePid: "",
       runId: "",
+      logs: {},
       signal: "reset-by-user",
       resetAt,
       updatedAt: resetAt,
@@ -1504,13 +1505,16 @@ function forwardToTask(task, text, config, fromUser = "") {
     return `${taskHeader(updated.id, "已排队")} (${updated.pendingInstructions.length})`;
   }
 
-  const updated = updateTask(task.id, (current) => ({
-    ...current,
-    fromUser: fromUser || current.fromUser || "",
-    status: "queued",
-    codexSessionId: current.codexSessionId || extractSessionIdFromJsonl(current.logs?.stdout),
-    updatedAt: new Date().toISOString(),
-  }));
+  const updated = updateTask(task.id, (current) => {
+    const recoveredSessionId = current.resetAt ? "" : extractSessionIdFromJsonl(current.logs?.stdout);
+    return {
+      ...current,
+      fromUser: fromUser || current.fromUser || "",
+      status: "queued",
+      codexSessionId: current.codexSessionId || recoveredSessionId,
+      updatedAt: new Date().toISOString(),
+    };
+  });
   startCodexRun({
     task: updated,
     prompt: formatAppendPrompt(updated, entry.text),
