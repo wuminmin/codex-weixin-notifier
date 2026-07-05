@@ -1005,7 +1005,7 @@ function sanitizeTmuxName(value) {
 }
 
 function makeTmuxSessionName(task, runId) {
-  return sanitizeTmuxName(`codex-wx-task-${task.id}-${runId}`);
+  return sanitizeTmuxName(`codex-wx-task-${task.id}`);
 }
 
 function tmuxHasSession(sessionName) {
@@ -1025,6 +1025,44 @@ function killTmuxSession(sessionName) {
   return true;
 }
 
+function listTmuxSessions() {
+  const result = spawnSync("tmux", ["list-sessions", "-F", "#{session_name}"], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) return [];
+  return result.stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+}
+
+function isLegacyTaskTmuxSession(sessionName) {
+  return /^codex-wx-task-\d+-(?:wxrun|wxr)-/u.test(String(sessionName || ""));
+}
+
+function cleanupLegacyTaskTmuxSessions(options = {}) {
+  const legacySessions = listTmuxSessions().filter(isLegacyTaskTmuxSession);
+  if (legacySessions.length === 0) return "task tmux clean · 没有旧 tmux session";
+  if (options.dryRun) {
+    return [
+      `task tmux clean · 将清理 ${legacySessions.length} 个旧 session`,
+      ...legacySessions.map((name) => `- ${name}`),
+    ].join("\n");
+  }
+
+  const killed = [];
+  const failed = [];
+  for (const sessionName of legacySessions) {
+    try {
+      if (killTmuxSession(sessionName)) killed.push(sessionName);
+    } catch (error) {
+      failed.push(`${sessionName}: ${error.message}`);
+    }
+  }
+
+  return [
+    `task tmux clean · 已清理 ${killed.length} 个旧 session`,
+    failed.length ? `失败 ${failed.length} 个:\n${failed.join("\n")}` : null,
+  ].filter(Boolean).join("\n");
+}
+
 function getTmuxPanePid(sessionName) {
   if (!sessionName) return "";
   const result = spawnSync("tmux", ["display-message", "-p", "-t", sessionName, "#{pane_pid}"], {
@@ -1035,6 +1073,8 @@ function getTmuxPanePid(sessionName) {
 
 function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, command, args, runId, stdoutPath, stderrPath, lastMessagePath }) {
   const sessionName = makeTmuxSessionName(task, runId);
+  if (tmuxHasSession(sessionName)) killTmuxSession(sessionName);
+  const keepOpen = process.env.CODEX_WEIXIN_KEEP_TMUX_OPEN === "1" || config.keepTmuxOpen === true;
   const shell = valueFrom(process.env.SHELL, "/bin/bash");
   const envPrefix = [
     ["CODEX_SESSION_ID", `weixin-task-${task.id}`],
@@ -1070,9 +1110,9 @@ function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, 
     "code=$?",
     completionLine,
     `printf '\\n[Codex Weixin task ${task.id} finished with exit %s.]\\n' "$code"`,
-    "printf '[Attach remains open for inspection. Press Ctrl-D to close.]\\n'",
-    `exec ${shQuote(shell)} -l`,
-  ].join("\n");
+    keepOpen ? "printf '[Attach remains open for inspection. Press Ctrl-D to close.]\\n'" : null,
+    keepOpen ? `exec ${shQuote(shell)} -l` : "exit \"$code\"",
+  ].filter(Boolean).join("\n");
 
   const tmux = spawnSync("tmux", ["new-session", "-d", "-s", sessionName, "-c", task.cwd, "/bin/bash", "-lc", script], {
     encoding: "utf8",
@@ -1548,6 +1588,7 @@ async function formatList(fromUser = "") {
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
   if (/^list$/iu.test(trimmed)) return { type: "list" };
+  if (/^task\s+tmux\s+clean$/iu.test(trimmed)) return { type: "tmux-clean" };
   const aliasMatch = trimmed.match(/^task\s+alias\s+(\S+)\s+(\S+)$/iu);
   if (aliasMatch) return { type: "alias", target: aliasMatch[1], alias: aliasMatch[2] };
   const unaliasMatch = trimmed.match(/^task\s+unalias\s+(\S+)$/iu);
@@ -1565,6 +1606,7 @@ function parseCommand(text) {
 async function handleText(text, fromUser, config) {
   const command = parseCommand(text);
   if (command.type === "list") return formatList(fromUser);
+  if (command.type === "tmux-clean") return cleanupLegacyTaskTmuxSessions({ dryRun: Boolean(config.dryRun) });
   if (command.type === "alias") return setTaskAlias(command.target, command.alias, { dryRun: Boolean(config.dryRun) });
   if (command.type === "unalias") return unsetTaskAlias(command.target, { dryRun: Boolean(config.dryRun) });
   if (command.type === "close") return closeTaskTargets(command.targets, fromUser, { dryRun: Boolean(config.dryRun) });

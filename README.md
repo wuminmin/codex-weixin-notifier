@@ -99,6 +99,7 @@ task 1
 task close 1
 task alias 1 godot
 task godot
+task tmux clean
 pwd
 ls
 ls /path/to/project
@@ -117,11 +118,12 @@ task close 1
 task alias 1 godot
 task godot
 task unalias godot
+task tmux clean
 pwd
 ls
 ```
 
-`task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task alias N name`, and `task name` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+`task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task alias N name`, `task name`, and `task tmux clean` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
 Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create `~/codex/task3`, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
 
@@ -131,6 +133,16 @@ Task ids are monotonic and are never deleted or reused. If the next id is `3`, `
 task close 1
 task close 1 godot
 ```
+
+tmux task sessions are fixed by task id:
+
+```text
+codex-wx-task-0
+codex-wx-task-1
+codex-wx-task-2
+```
+
+Finished task runs close their tmux session by default. Set `CODEX_WEIXIN_KEEP_TMUX_OPEN=1` or `keepTmuxOpen: true` only when you need a debug shell left open. `task tmux clean` removes old pre-fixed-session names such as `codex-wx-task-1-wxrun-...` and `codex-wx-task-1-wxr-...`.
 
 Replies are prefixed with the task id:
 
@@ -166,6 +178,11 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task close 999"
+
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --once \
+  --dry-run \
+  --message "task tmux clean"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs --list
 ```
