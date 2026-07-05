@@ -165,6 +165,8 @@ codex-wx-task-2
 
 Finished task runs close their tmux session by default. Set `CODEX_WEIXIN_KEEP_TMUX_OPEN=1` or `keepTmuxOpen: true` only when you need a debug shell left open. `task tmux clean` removes old pre-fixed-session names such as `codex-wx-task-1-wxrun-...` and `codex-wx-task-1-wxr-...`.
 
+When the router starts or receives a new ordinary task message, it refreshes the recorded task runner state. If a task is marked `running` or `queued` but the recorded tmux session or pid no longer exists, the router clears the stale runner fields. If that task has pending instructions, the router automatically resumes the queue instead of leaving new messages stuck behind a dead run.
+
 Ordinary Weixin messages use a global approval-first rule before execution. Unless the current message contains an approval phrase or a clear approval intent, the child Codex task should quickly return an intent confirmation or short plan instead of editing files, running shell commands, starting apps, installing packages, launching long-running work, or sending media. Default approval phrases:
 
 ```text

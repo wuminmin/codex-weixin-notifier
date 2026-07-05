@@ -100,6 +100,7 @@ Important behavior:
 - `task reset ...` refuses running, starting, or queued tasks; close them first with `task close ...`.
 - tmux runner sessions are fixed by task id, such as `codex-wx-task-0` and `codex-wx-task-1`; completed runs close by default unless `CODEX_WEIXIN_KEEP_TMUX_OPEN=1` or `keepTmuxOpen: true` is set.
 - `task tmux clean` only removes legacy per-run sessions named like `codex-wx-task-1-wxrun-...` or `codex-wx-task-1-wxr-...`; it does not remove `codex-wx-router` or fixed task sessions.
+- Router startup and ordinary message forwarding refresh stale task runner state. If a task is marked active but its tmux session or pid is gone, the stale runner fields are cleared and pending instructions are resumed instead of leaving future messages stuck in queue.
 - Child Codex runs default to `--sandbox workspace-write`; use `CODEX_WEIXIN_CODEX_SANDBOX` / `codexSandbox` to change the sandbox mode, or `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true` only when intentionally allowing unsandboxed WSL access.
 - Weixin-forwarded Codex prompts require approval intent before execution. Default approval phrases include `同意`, `批准`, `可以`, `执行`, `开始`, `做吧`, `继续`, `ok`, `yes`, `go ahead`, and `approve`; customize with `CODEX_WEIXIN_EXECUTION_APPROVAL_PHRASES` or `executionApprovalPhrases`.
 - The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.

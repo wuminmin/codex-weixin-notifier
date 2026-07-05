@@ -1739,7 +1739,6 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   const queued = Array.isArray(latest.pendingInstructions) ? [...latest.pendingInstructions] : [];
   if (queued.length > 0) {
     const nextInstruction = normalizeInstructionEntry(queued.shift());
-    const imagePaths = imagePathsFromAttachments(nextInstruction.attachments);
     const updated = updateTask(latest.id, (current) => ({
       ...current,
       pendingInstructions: queued,
@@ -1747,14 +1746,7 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
       updatedAt: new Date().toISOString(),
     }));
     if (updated) {
-      startCodexRun({
-        task: updated,
-        prompt: formatAppendPrompt(updated, nextInstruction.text, nextInstruction.attachments, config),
-        config,
-        resumeSessionId: updated.codexSessionId || "",
-        resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
-        imagePaths,
-      });
+      startInstructionForTask(updated, nextInstruction, config);
     }
     return updated;
   }
@@ -1773,6 +1765,7 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
 }
 
 function forwardToTask(task, text, config, fromUser = "", attachments = []) {
+  task = refreshTaskLiveness(task);
   const instruction = String(text || "").trim();
   if (!instruction && attachments.length === 0) return `task ${task.id}: 空消息已忽略`;
 
@@ -1785,7 +1778,6 @@ function forwardToTask(task, text, config, fromUser = "", attachments = []) {
     attachments,
     addedAt: new Date().toISOString(),
   };
-  const imagePaths = imagePathsFromAttachments(entry.attachments);
 
   if (["running", "starting", "queued"].includes(task.status)) {
     const updated = updateTask(task.id, (current) => ({
@@ -1795,6 +1787,25 @@ function forwardToTask(task, text, config, fromUser = "", attachments = []) {
       updatedAt: new Date().toISOString(),
     }));
     return `${taskHeader(updated.id, "已排队")} (${updated.pendingInstructions.length})`;
+  }
+
+  const pending = Array.isArray(task.pendingInstructions) ? [...task.pendingInstructions] : [];
+  if (pending.length > 0) {
+    pending.push(entry);
+    const nextInstruction = normalizeInstructionEntry(pending.shift());
+    const updated = updateTask(task.id, (current) => {
+      const recoveredSessionId = current.resetAt ? "" : extractSessionIdFromJsonl(current.logs?.stdout);
+      return {
+        ...current,
+        fromUser: fromUser || current.fromUser || "",
+        pendingInstructions: pending,
+        status: "queued",
+        codexSessionId: current.codexSessionId || recoveredSessionId,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    if (updated) startInstructionForTask(updated, nextInstruction, config);
+    return `${taskHeader(updated.id, "恢复队列处理中")} (${updated.pendingInstructions.length})`;
   }
 
   const updated = updateTask(task.id, (current) => {
@@ -1807,14 +1818,7 @@ function forwardToTask(task, text, config, fromUser = "", attachments = []) {
       updatedAt: new Date().toISOString(),
     };
   });
-  startCodexRun({
-    task: updated,
-    prompt: formatAppendPrompt(updated, entry.text, entry.attachments, config),
-    config,
-    resumeSessionId: updated.codexSessionId || "",
-    resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
-    imagePaths,
-  });
+  startInstructionForTask(updated, entry, config);
   return taskHeader(updated.id, "处理中");
 }
 
@@ -1916,6 +1920,70 @@ function pruneDeadTasks() {
   }
   if (changed) saveTasks(state);
   return state;
+}
+
+function taskHasLiveRunner(task) {
+  if (!isTaskActive(task)) return true;
+  if (task.runner === "tmux" || task.tmuxSession) {
+    return Boolean(task.tmuxSession && tmuxHasSession(task.tmuxSession));
+  }
+  if (!task.pid) return false;
+  try {
+    process.kill(Number(task.pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function refreshTaskLiveness(task) {
+  if (!task || !isTaskActive(task) || taskHasLiveRunner(task)) return task;
+  return updateTask(task.id, (current) => ({
+    ...current,
+    status: current.exitCode === 0 ? "completed" : "unknown",
+    tmuxSession: "",
+    tmuxAttach: "",
+    tmuxPanePid: "",
+    pid: "",
+    staleRunnerClearedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  })) || task;
+}
+
+function startInstructionForTask(task, instructionEntry, config) {
+  const entry = normalizeInstructionEntry(instructionEntry);
+  const imagePaths = imagePathsFromAttachments(entry.attachments);
+  startCodexRun({
+    task,
+    prompt: formatAppendPrompt(task, entry.text, entry.attachments, config),
+    config,
+    resumeSessionId: task.codexSessionId || "",
+    resumeLast: !task.codexSessionId && Boolean(task.resumeLast),
+    imagePaths,
+  });
+}
+
+function recoverStaleTaskQueues(config) {
+  const recovered = [];
+  const state = loadTasks();
+  for (const task of state.tasks) {
+    const refreshed = refreshTaskLiveness(task);
+    if (!refreshed || isTaskActive(refreshed)) continue;
+    const queued = Array.isArray(refreshed.pendingInstructions) ? [...refreshed.pendingInstructions] : [];
+    if (queued.length === 0) continue;
+
+    const nextInstruction = normalizeInstructionEntry(queued.shift());
+    const updated = updateTask(refreshed.id, (current) => ({
+      ...current,
+      pendingInstructions: queued,
+      status: "queued",
+      updatedAt: new Date().toISOString(),
+    }));
+    if (!updated) continue;
+    startInstructionForTask(updated, nextInstruction, config);
+    recovered.push(updated.id);
+  }
+  return recovered;
 }
 
 function formatTaskBlock(task, fromUser = "") {
@@ -2068,6 +2136,10 @@ async function main() {
   if (args.once === "true") {
     await runOnce(args, config);
     return;
+  }
+  const recovered = recoverStaleTaskQueues(config);
+  if (recovered.length > 0) {
+    process.stdout.write(`Recovered stale queued tasks: ${recovered.join(", ")}\n`);
   }
   await runPoll(args, config);
 }
