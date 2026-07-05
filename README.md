@@ -93,37 +93,35 @@ The router stores state in:
 Send these messages to the paired Weixin bot:
 
 ```text
-help
-list
-new add tests for codex-weixin-notifier
-confirm req-20260705041249-ac9cde
-dir req-20260705041249-ac9cde /path/to/codex-weixin-notifier
-append task-20260705041249-ac9cde also update the README
-@task-20260705041249-ac9cde also update the README
-focus task-20260705041249-ac9cde
-also add a smoke test
-unfocus
-cancel req-20260705041249-ac9cde
+add tests for codex-weixin-notifier
+yes
+continue by updating the README too
+yes
+no
+s
+show
 ```
 
 Chinese aliases are also supported:
 
 ```text
-帮助
+给 codex-weixin-notifier 增加一个 smoke test
+yes
+顺手更新 README
+yes
+no
+状态
 列表
-开始任务 给 codex-weixin-notifier 增加一个 smoke test
-确认 req-20260705041249-ac9cde
-目录 req-20260705041249-ac9cde /path/to/codex-weixin-notifier
-追加 task-20260705041249-ac9cde 顺手更新 README
-焦点 task-20260705041249-ac9cde
-再增加一个冒烟测试
-取消焦点
-取消 req-20260705041249-ac9cde
 ```
 
-Every inbound Weixin message first goes to `weixin-command-router.mjs`. The router owns the text protocol: `list`, `help`, `new`, `confirm`, `dir`, `cancel`, `append`, `focus`, and `unfocus` are router commands. Directed messages such as `append <task-id> ...`, `@<task-id> ...`, and `给 <task-id> ...` are sent to that task. If you set `focus <task-id>`, plain messages are appended to the focused task until `unfocus`; without a focused task, plain messages create a new pending task.
+Every inbound Weixin message first goes to `weixin-command-router.mjs`. The default Weixin protocol is intentionally tiny: normal text becomes a short pending action, `yes` executes it, and `no` cancels it. The router keeps the action vocabulary small internally:
 
-Every new task first becomes a pending request. The router chooses a suggested working directory from the task intent and local project metadata, then waits for `confirm` or `dir` before it starts `codex exec`.
+- `create` starts a new tmux-backed Codex task.
+- `send` appends a message to an existing task.
+- `view` shows task state.
+- `ask` requests clarification.
+
+Every new task first becomes a pending action. Each Weixin sender has at most one active pending action; a new proposal replaces that sender's previous pending proposal. The router chooses a suggested working directory from the task intent and local project metadata, then waits for `yes` before it starts `codex exec`. While a pending action exists, ordinary follow-up text revises that pending action instead of creating another one; for example, if the proposed directory is too broad, say the missing folder name and the router updates the proposal. After a task starts, the router automatically focuses that task so the next normal message is proposed as a `send` action to the same task. `s`, `show`, `status`, and `list` show status immediately, and advanced commands such as `append <task-id> ...`, `@<task-id> ...`, `focus <task-id>`, `confirm <req-id>`, and `cancel <req-id>` are still supported for manual control.
 
 `list` shows the focused task, registered active tasks, recent completed/failed tasks, pending confirmations, visible Codex processes, each task's working directory, and tmux session metadata when present. `append` can target a registered task id, an id prefix, a registered task pid, a registered tmux session, or an external Codex pid. If the target task is currently running, the instruction is queued and automatically sent with `codex exec resume` after the current turn exits. For a completed registered task, `append` starts a follow-up run in the same working directory and resumes the recorded Codex session when available. For an external Codex pid, the router starts a registered follow-up in that process cwd with `codex exec resume --last`. Arbitrary terminal injection is not attempted; start tasks through this router when you want exact task-level append tracking.
 
@@ -156,7 +154,7 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 tmux attach -t codex-wx-task-...
 ```
 
-Working directory is still chosen before launch: send `confirm req-...` to accept the suggested cwd, or `dir req-... /path/to/workspace` to override it and start the tmux session there.
+Working directory is chosen before launch from the natural-language request and shown in the pending action. Send `yes` to accept it or `no` to discard it.
 
 `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_WORKSPACE_ROOT`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override those fields.
 

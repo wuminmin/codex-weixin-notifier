@@ -200,15 +200,61 @@ function saveTasks(state) {
   });
 }
 
+function pendingOwnerKey(request) {
+  return request?.fromUser ? `user:${focusKey(request.fromUser)}` : "local";
+}
+
+function normalizePendingRequests(requests) {
+  const seen = new Set();
+  const normalized = [];
+  for (const request of Array.isArray(requests) ? requests : []) {
+    const key = pendingOwnerKey(request);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(request);
+  }
+  return normalized;
+}
+
 function loadPending() {
-  return readJsonFile(PENDING_PATH, { requests: [] });
+  const pending = readJsonFile(PENDING_PATH, { requests: [] });
+  return {
+    ...pending,
+    requests: normalizePendingRequests(pending.requests),
+  };
 }
 
 function savePending(state) {
   return writeJsonFile(PENDING_PATH, {
-    requests: Array.isArray(state.requests) ? state.requests : [],
+    requests: normalizePendingRequests(state.requests),
     updatedAt: new Date().toISOString(),
   });
+}
+
+function latestPendingForUser(fromUser) {
+  const pending = loadPending();
+  const requests = Array.isArray(pending.requests) ? pending.requests : [];
+  const key = focusKey(fromUser);
+  return requests.find((request) => focusKey(request.fromUser) === key)
+    || requests.find((request) => !request.fromUser)
+    || null;
+}
+
+function removePending(requestId) {
+  const pending = loadPending();
+  const before = pending.requests.length;
+  pending.requests = pending.requests.filter((item) => item.id !== requestId);
+  savePending(pending);
+  return before !== pending.requests.length;
+}
+
+function updatePending(requestId, updater) {
+  const pending = loadPending();
+  const index = pending.requests.findIndex((item) => item.id === requestId);
+  if (index === -1) return null;
+  pending.requests[index] = updater({ ...pending.requests[index] });
+  savePending(pending);
+  return pending.requests[index];
 }
 
 function loadFocus() {
@@ -1006,17 +1052,247 @@ function createPendingTask(intent, fromUser, config, args) {
   const proposal = proposeWorkdir(intent, config, args);
   const request = {
     id: createId("req"),
+    kind: "create",
+    summary: "启动新任务",
+    text: intent,
     intent,
+    cwd: proposal.cwd,
     proposedCwd: proposal.cwd,
     reason: proposal.reason,
     fromUser,
-    status: "pending_workdir_confirmation",
+    status: "pending_yes_no",
     createdAt: new Date().toISOString(),
   };
   const pending = loadPending();
+  pending.requests = pending.requests.filter((item) => pendingOwnerKey(item) !== pendingOwnerKey(request));
   pending.requests.unshift(request);
   savePending(pending);
   return request;
+}
+
+function createPendingAction(action) {
+  const pending = loadPending();
+  const request = {
+    id: createId("req"),
+    status: "pending_yes_no",
+    createdAt: new Date().toISOString(),
+    ...action,
+  };
+  pending.requests = pending.requests.filter((item) => pendingOwnerKey(item) !== pendingOwnerKey(request));
+  pending.requests.unshift(request);
+  savePending(pending);
+  return request;
+}
+
+function recentFinishedTasks(limit = 8) {
+  const state = loadTasks();
+  return (state.tasks || [])
+    .filter((task) => ["completed", "failed", "unknown", "running", "queued", "starting"].includes(task.status))
+    .sort((a, b) => String(b.updatedAt || b.finishedAt || b.createdAt).localeCompare(String(a.updatedAt || a.finishedAt || a.createdAt)))
+    .slice(0, limit);
+}
+
+function scoreTaskForText(task, text) {
+  const haystack = [
+    task.id,
+    task.cwd,
+    path.basename(task.cwd || ""),
+    task.intent,
+    task.tmuxSession,
+  ].join("\n").toLowerCase();
+  let score = 0;
+  for (const token of tokenize(text)) {
+    if (haystack.includes(token)) score += token.length > 3 ? 4 : 1;
+  }
+  if (/刚才|继续|追加|补充|再|日志|修复|检查|看一下/u.test(text)) score += 1;
+  return score;
+}
+
+function chooseTaskForText(text, fromUser) {
+  const focused = getFocusedTask(fromUser);
+  if (focused) return focused;
+
+  let best = null;
+  let bestScore = 0;
+  for (const task of recentFinishedTasks(12)) {
+    const score = scoreTaskForText(task, text);
+    if (score > bestScore) {
+      best = task;
+      bestScore = score;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+function planNaturalMessage(text, fromUser, config, args) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) {
+    return createPendingAction({
+      kind: "ask",
+      fromUser,
+      question: "你想让我做什么？",
+      summary: "需要补充需求",
+    });
+  }
+
+  if (/^(状态|看看|查看|最近|任务|进度|结果)/u.test(trimmed) || /任务.*(状态|列表|进度|结果)/u.test(trimmed)) {
+    return createPendingAction({
+      kind: "view",
+      fromUser,
+      summary: "显示任务状态和最近任务",
+    });
+  }
+
+  const wantsCreate = /(新任务|启动|开始|创建|新开|另开|从头)/u.test(trimmed)
+    || /^(帮我|请|处理|做|实现|修复|检查|改|写)/u.test(trimmed);
+  const wantsSend = /(继续|追加|补充|接着|刚才|那个|这个|日志|再)/u.test(trimmed);
+  const target = wantsCreate ? null : (wantsSend ? chooseTaskForText(trimmed, fromUser) : getFocusedTask(fromUser));
+
+  if (target) {
+    return createPendingAction({
+      kind: "send",
+      fromUser,
+      target: target.id,
+      text: trimmed,
+      summary: `发送给 ${target.id}`,
+    });
+  }
+
+  const proposal = proposeWorkdir(trimmed, config, args);
+  return createPendingAction({
+    kind: "create",
+    fromUser,
+    summary: "启动新任务",
+    text: trimmed,
+    intent: trimmed,
+    cwd: proposal.cwd,
+    proposedCwd: proposal.cwd,
+    reason: proposal.reason,
+  });
+}
+
+function listChildDirs(parent, limit = 12) {
+  try {
+    return fs.readdirSync(parent, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => path.join(parent, entry.name))
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+function meaningfulPathTokens(text) {
+  return tokenize(text)
+    .filter((token) => ![
+      "是",
+      "不是",
+      "目录",
+      "里面",
+      "子文件夹",
+      "文件夹",
+      "godot",
+      "应该",
+      "改成",
+      "换成",
+      "the",
+      "subfolder",
+      "folder",
+    ].includes(token));
+}
+
+function chooseChildDir(parent, text) {
+  const tokens = meaningfulPathTokens(text);
+  if (!tokens.length) return null;
+  let best = null;
+  let bestScore = 0;
+  for (const child of listChildDirs(parent, 200)) {
+    const name = path.basename(child).toLowerCase();
+    let score = 0;
+    for (const token of tokens) {
+      if (name.includes(token.toLowerCase())) score += token.length > 3 ? 4 : 1;
+    }
+    if (score > bestScore) {
+      best = child;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function revisePendingAction(text, fromUser, config, args) {
+  const request = latestPendingForUser(fromUser);
+  if (!request) return null;
+  const kind = request.kind || "create";
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return formatProposal(request);
+
+  if (kind === "create") {
+    const currentCwd = request.cwd || request.proposedCwd;
+    if (/子文件夹|subfolder/i.test(trimmed) && currentCwd) {
+      const child = chooseChildDir(currentCwd, trimmed);
+      if (!child) {
+        const children = listChildDirs(currentCwd, 8).map((dir) => path.basename(dir));
+        return [
+          "我理解你是在修正当前准备动作：目录要用 godot 的子文件夹。",
+          "但还缺子文件夹名字。",
+          children.length ? `可见子目录：${children.join(", ")}` : null,
+          "",
+          "直接发子文件夹名字；yes 仍会用当前目录。",
+        ].filter(Boolean).join("\n");
+      }
+      const updated = updatePending(request.id, (current) => ({
+        ...current,
+        cwd: child,
+        proposedCwd: child,
+        text: current.text || current.intent,
+        clarification: compact(trimmed, 300),
+        reason: `updated from clarification: ${trimmed}`,
+        updatedAt: new Date().toISOString(),
+      }));
+      return [
+        "已修改当前准备动作。",
+        "",
+        formatProposal(updated),
+      ].join("\n");
+    }
+
+    const explicit = findPathHint(trimmed);
+    const combined = [request.text || request.intent, trimmed].filter(Boolean).join("\n");
+    const proposal = explicit
+      ? { cwd: explicit, reason: "the clarification includes an existing directory path" }
+      : proposeWorkdir(combined, config, args);
+    const updated = updatePending(request.id, (current) => ({
+      ...current,
+      text: combined,
+      intent: combined,
+      cwd: proposal.cwd,
+      proposedCwd: proposal.cwd,
+      clarification: compact(trimmed, 300),
+      reason: proposal.reason,
+      updatedAt: new Date().toISOString(),
+    }));
+    return [
+      "已按补充说明修改当前准备动作。",
+      "",
+      formatProposal(updated),
+    ].join("\n");
+  }
+
+  if (kind === "send") {
+    const updated = updatePending(request.id, (current) => ({
+      ...current,
+      text: [current.text || current.instruction, trimmed].filter(Boolean).join("\n"),
+      updatedAt: new Date().toISOString(),
+    }));
+    return [
+      "已修改当前准备发送的内容。",
+      "",
+      formatProposal(updated),
+    ].join("\n");
+  }
+
+  return null;
 }
 
 function cancelPending(requestId) {
@@ -1028,6 +1304,38 @@ function cancelPending(requestId) {
 }
 
 function formatProposal(request) {
+  const kind = request.kind || "create";
+  if (kind === "create") {
+    return [
+      "准备：启动新任务",
+      `目录：${request.cwd || request.proposedCwd}`,
+      `内容：${compact(request.text || request.intent, 500)}`,
+      request.reason ? `依据：${request.reason}` : null,
+      "",
+      "回复 yes 执行，no 取消",
+    ].filter(Boolean).join("\n");
+  }
+  if (kind === "send") {
+    return [
+      "准备：发送给已有任务",
+      `目标：${request.target}`,
+      `内容：${compact(request.text || request.instruction, 500)}`,
+      "",
+      "回复 yes 执行，no 取消",
+    ].join("\n");
+  }
+  if (kind === "view") {
+    return [
+      "准备：查看状态",
+      request.summary || "显示任务状态",
+      "",
+      "回复 yes 执行，no 取消",
+    ].join("\n");
+  }
+  if (kind === "ask") {
+    return request.question || request.summary || "我需要你再说明一下。";
+  }
+
   return [
     `Ready to start ${request.id}`,
     `Intent: ${compact(request.intent, 500)}`,
@@ -1136,7 +1444,7 @@ async function formatList(fromUser = "") {
     .map((task) => formatTaskLine(task, 120));
 
   const pendingLines = pending.requests.slice(0, 8).map((request) => (
-    `${request.id} [pending cwd] | cwd=${request.proposedCwd} | intent=${compact(request.intent, 100)}`
+    `${request.id} [${request.kind || "create"}] | ${request.cwd || request.proposedCwd || request.target || "-"} | ${compact(request.text || request.intent || request.summary || request.question, 100)}`
   ));
   const processes = await listCodexProcesses();
   const focused = getFocusedTask(fromUser);
@@ -1263,9 +1571,51 @@ function appendInstruction(target, instruction, config) {
   };
 }
 
+async function acceptPendingAction(fromUser, config) {
+  const request = latestPendingForUser(fromUser);
+  if (!request) return "没有待确认事项。直接发需求给我就行。";
+  const kind = request.kind || "create";
+
+  if (kind === "create") {
+    const result = startTaskFromPending(request.id, request.cwd || request.proposedCwd, config);
+    if (result.ok && result.task?.id) {
+      setFocusedTask(fromUser, result.task.id);
+    }
+    return result.ok
+      ? `${result.message}\n\n已自动切到这个任务。后续普通文字会先准备发送给它。`
+      : result.message;
+  }
+
+  removePending(request.id);
+  if (kind === "send") {
+    const result = appendInstruction(request.target, request.text || request.instruction, config);
+    if (result.ok) setFocusedTask(fromUser, request.target);
+    return result.message;
+  }
+
+  if (kind === "view") {
+    return formatList(fromUser);
+  }
+
+  if (kind === "ask") {
+    return request.question || "我还需要你补充一句。";
+  }
+
+  return `未知待确认类型：${kind}`;
+}
+
+function rejectPendingAction(fromUser) {
+  const request = latestPendingForUser(fromUser);
+  if (!request) return "没有待取消事项。";
+  removePending(request.id);
+  return "已取消。";
+}
+
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
-  const listPattern = /^(list|ls|tasks|processes|任务|列表|进程)$/iu;
+  const yesPattern = /^(yes|y|ok|okay|好|好的|是|确认|可以|行|执行|启动|开始)$/iu;
+  const noPattern = /^(no|n|nope|不|不要|否|取消|算了|停止)$/iu;
+  const listPattern = /^(s|show|status|list|ls|tasks|processes|状态|进度|任务|列表|进程)$/iu;
   const helpPattern = /^(help|帮助|\?)$/iu;
   const focusStatusPattern = /^(focus|焦点)$/iu;
   const focusPattern = /^(focus|use|select|切换|选中|焦点)\s+(\S+)$/iu;
@@ -1278,6 +1628,8 @@ function parseCommand(text) {
   const newPattern = /^(new|task|开始任务|新任务)\s+([\s\S]+)$/iu;
 
   let match = trimmed.match(listPattern);
+  if (trimmed.match(yesPattern)) return { type: "yes" };
+  if (trimmed.match(noPattern)) return { type: "no" };
   if (match) return { type: "list" };
   match = trimmed.match(helpPattern);
   if (match) return { type: "help" };
@@ -1305,25 +1657,25 @@ function parseCommand(text) {
 function formatHelp(fromUser = "") {
   const focused = getFocusedTask(fromUser);
   return [
-    "Router commands:",
-    "list",
-    "new <task>",
-    "confirm <req-id>",
-    "dir <req-id> <cwd>",
-    "append <task-id> <instruction>",
-    "@<task-id> <instruction>",
-    "focus <task-id>",
-    "unfocus",
+    "直接发需求，我会先给出准备动作。",
+    "回复 yes 执行，no 取消。",
+    "",
+    "可选：s / show / list 查看状态",
+    "可选：@task-id 补充指令",
     "",
     focused
-      ? `Plain messages currently append to ${focused.id}.`
-      : "Plain messages currently create a new pending task.",
+      ? `当前默认目标：${focused.id}`
+      : "当前没有默认目标。",
   ].join("\n");
 }
 
 async function handleText(text, fromUser, config, args) {
   const command = parseCommand(text);
   switch (command.type) {
+    case "yes":
+      return acceptPendingAction(fromUser, config);
+    case "no":
+      return rejectPendingAction(fromUser);
     case "list":
       return formatList(fromUser);
     case "help":
@@ -1357,15 +1709,9 @@ async function handleText(text, fromUser, config, args) {
     }
     case "message": {
       if (!command.text) return formatHelp(fromUser);
-      const focused = getFocusedTask(fromUser);
-      if (focused) {
-        const result = appendInstruction(focused.id, command.text, config);
-        return [
-          `Sent to focused task ${focused.id}.`,
-          result.message,
-        ].join("\n");
-      }
-      const request = createPendingTask(command.text, fromUser, config, args);
+      const revision = revisePendingAction(command.text, fromUser, config, args);
+      if (revision) return revision;
+      const request = planNaturalMessage(command.text, fromUser, config, args);
       return formatProposal(request);
     }
     default:
