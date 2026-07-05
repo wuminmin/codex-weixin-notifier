@@ -69,27 +69,23 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs
 Supported inbound Weixin commands:
 
 - `list`: list numbered tasks.
-- `task 0`, `task 1`, `task 2`: switch the current Codex task for that Weixin sender.
-- `close task 1`, `stop 1`, `关闭 task 1`, `停止 task 1 task 2`: close one or more non-default tasks by Weixin-visible task id.
+- `task 0`, `task 1`, `task 2`: enter an existing task, or create the next numeric task in order.
+- `task close 1`, `task close godot`: close one or more non-default tasks by id or alias.
+- `task alias 1 godot`, `task unalias godot`, `task godot`: set, remove, or enter a task alias.
 - `pwd`, `ls`, `ls /path`, `ls -la /path`: run simple WSL directory commands in the current task cwd and return output with line breaks preserved.
 - Any other text: forward to the current task.
 
 Important behavior:
 
 - `task 0` is the default Codex assistant and always exists.
-- `task 0` defaults to the WSL home directory unless `CODEX_WEIXIN_DEFAULT_CWD` is set.
+- `task 0` uses `~/codex/task0`; `task 1` uses `~/codex/task1`; every task has a fixed directory under `~/codex/taskN`.
 - `task 0` cannot be closed from Weixin; close commands only apply to task 1 and later.
-- `task 1`, `task 2`, and later tasks are created only by `task 0`.
-- The router does not interpret natural language. It only handles exact `list`, `task N`, and close commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.
+- Task ids are monotonic and must be created one at a time; ids are not deleted or reused.
+- `task 0` does not create other tasks. New tasks are created only by explicit `task N` commands.
+- The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.
 - Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
 - To send a local image or file back to Weixin, the Codex task should put `MEDIA:/absolute/path/to/file` on its own line. Images are sent as image messages; other supported files are sent as file attachments.
 - Media files must be under `~` or `/tmp` by default and are limited to 20 MB unless `mediaRoots` / `CODEX_WEIXIN_MEDIA_ROOTS` and `maxMediaBytes` / `CODEX_WEIXIN_MAX_MEDIA_BYTES` are configured.
-- `task 0` may create a subtask by emitting this internal JSON object on its own line:
-
-```json
-{"type":"create_task","cwd":"/absolute/workdir","prompt":"the full task instruction"}
-```
-
 Local command-router smoke checks:
 
 ```bash
@@ -101,7 +97,7 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
-  --message "close task 999"
+  --message "task close 999"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs --list
 ```

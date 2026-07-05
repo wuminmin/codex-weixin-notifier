@@ -96,7 +96,9 @@ Send these messages to the paired Weixin bot:
 list
 task 0
 task 1
-close task 1
+task close 1
+task alias 1 godot
+task godot
 pwd
 ls
 ls /path/to/project
@@ -111,20 +113,23 @@ list
 task 0
 task 1
 task 2
-close task 1
-关闭 task 1 task 2
+task close 1
+task alias 1 godot
+task godot
+task unalias godot
 pwd
 ls
 ```
 
-`task 0` is the default Codex assistant and always exists. `task 1`, `task 2`, and later tasks are subtasks created by `task 0`. The router handles exact `list`, `task N`, and `close task N` / `关闭 task N` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+`task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task alias N name`, and `task name` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
-`close`, `stop`, `kill`, `关闭`, and `停止` accept one or more task numbers and close by the Weixin-visible task id. `task 0` is protected and cannot be closed:
+Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create `~/codex/task3`, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
+
+`task close` accepts one or more task ids or aliases:
 
 ```text
-close task 1
-close task 1 task 2
-停止 task 2
+task close 1
+task close 1 godot
 ```
 
 Replies are prefixed with the task id:
@@ -134,23 +139,18 @@ task 0: 已开始
 task 1: completed
 ```
 
-Subtasks are created only by `task 0` through an internal protocol emitted by the Codex process:
-
-```json
-{"type":"create_task","cwd":"/absolute/workdir","prompt":"the full task instruction"}
-```
-
 `list` shows the numbered task list with current/default markers:
 
 ```text
 task 0 [default,current]
 状态: default
-目录: /home/user
+目录: ~/codex/task0
 摘要: 默认 Codex 助理
 
 task 1 [running]
+别名: godot
 状态: running
-目录: /path/to/codex-weixin-notifier
+目录: ~/codex/task1
 摘要: 修改微信路由
 ```
 
@@ -165,7 +165,7 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
-  --message "close task 999"
+  --message "task close 999"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs --list
 ```
@@ -186,7 +186,7 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 tmux attach -t codex-wx-task-...
 ```
 
-`task 0` defaults to the WSL home directory. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_DEFAULT_CWD`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override those fields.
+All task working directories are fixed under `~/codex/taskN`. `CODEX_WEIXIN_TASK_ROOT` can override the root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
 
 ## Media Replies
 

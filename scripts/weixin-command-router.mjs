@@ -15,6 +15,7 @@ const TASKS_PATH = `${STATE_DIR}/tasks.json`;
 const CURRENT_PATH = `${STATE_DIR}/current-task.json`;
 const SYNC_PATH = `${STATE_DIR}/command-sync.json`;
 const LOG_DIR = `${STATE_DIR}/logs`;
+const TASK_WORKSPACE_ROOT = "~/codex";
 const COMPAT_SYNC_PATH = "~/.codex/channels/wechat/sync_buf.json";
 const COMPAT_CONTEXT_TOKENS_PATH = "~/.codex/channels/wechat/context_tokens.json";
 const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
@@ -221,15 +222,32 @@ function isDryRun(args, config) {
   return args["dry-run"] === "true" || process.env.CODEX_WEIXIN_DRY_RUN === "1" || config.dryRun === true;
 }
 
-function defaultTaskCwd() {
-  return valueFrom(process.env.CODEX_WEIXIN_DEFAULT_CWD, os.homedir());
+function taskWorkspaceRoot() {
+  return expandHome(valueFrom(process.env.CODEX_WEIXIN_TASK_ROOT, TASK_WORKSPACE_ROOT));
 }
 
-function shouldMigrateDefaultTaskCwd(task) {
-  if (String(task?.id) !== DEFAULT_TASK_ID) return false;
-  const cwd = String(task.cwd || "");
-  const current = process.cwd();
-  return cwd === current && /\/plugins\/codex-weixin-notifier$/u.test(current);
+function taskCwd(taskId) {
+  return path.join(taskWorkspaceRoot(), `task${taskId}`);
+}
+
+function ensureTaskCwd(taskId) {
+  const cwd = taskCwd(taskId);
+  fs.mkdirSync(cwd, { recursive: true });
+  return cwd;
+}
+
+function isTaskActive(task) {
+  return ["running", "starting", "queued"].includes(task?.status);
+}
+
+function fixedTaskCwd(taskId) {
+  return ensureTaskCwd(taskId);
+}
+
+function isValidAlias(alias) {
+  const name = String(alias || "").trim();
+  if (!name || /\s/u.test(name) || /^\d+$/u.test(name)) return false;
+  return !new Set(["task", "list", "close", "alias", "unalias", "pwd", "ls"]).has(name.toLowerCase());
 }
 
 function normalizeTasksState(state) {
@@ -241,7 +259,7 @@ function normalizeTasksState(state) {
       id: DEFAULT_TASK_ID,
       kind: "default",
       intent: "默认 Codex 助理",
-      cwd: defaultTaskCwd(),
+      cwd: fixedTaskCwd(DEFAULT_TASK_ID),
       status: "default",
       createdAt: new Date().toISOString(),
       pendingInstructions: [],
@@ -250,13 +268,19 @@ function normalizeTasksState(state) {
   } else {
     defaultTask.kind = "default";
     defaultTask.intent = defaultTask.intent || "默认 Codex 助理";
-    if (!defaultTask.cwd || shouldMigrateDefaultTaskCwd(defaultTask)) {
-      defaultTask.cwd = defaultTaskCwd();
+    if (!defaultTask.cwd || defaultTask.cwd !== fixedTaskCwd(DEFAULT_TASK_ID)) {
+      defaultTask.cwd = fixedTaskCwd(DEFAULT_TASK_ID);
       defaultTask.codexSessionId = "";
       defaultTask.resumeOf = "";
       defaultTask.resumeLast = false;
-      defaultTask.logs = {};
-      defaultTask.status = "default";
+      if (!isTaskActive(defaultTask)) {
+        defaultTask.logs = {};
+        defaultTask.pid = "";
+        defaultTask.tmuxSession = "";
+        defaultTask.tmuxPanePid = "";
+        defaultTask.tmuxAttach = "";
+        defaultTask.status = "default";
+      }
     }
     defaultTask.status = defaultTask.status || "default";
     defaultTask.pendingInstructions = Array.isArray(defaultTask.pendingInstructions) ? defaultTask.pendingInstructions : [];
@@ -264,6 +288,26 @@ function normalizeTasksState(state) {
 
   for (const task of tasks) {
     const numericId = Number(task.id);
+    if (Number.isInteger(numericId) && numericId >= 0) {
+      const fixedCwd = fixedTaskCwd(String(task.id));
+      if (!task.cwd || task.cwd !== fixedCwd) {
+        task.cwd = fixedCwd;
+        task.codexSessionId = "";
+        task.resumeOf = "";
+        task.resumeLast = false;
+        if (!isTaskActive(task)) {
+          task.logs = {};
+          task.pid = "";
+          task.tmuxSession = "";
+          task.tmuxPanePid = "";
+          task.tmuxAttach = "";
+        }
+      }
+      task.kind = String(task.id) === DEFAULT_TASK_ID ? "default" : task.kind || "task";
+      task.intent = task.intent || (String(task.id) === DEFAULT_TASK_ID ? "默认 Codex 助理" : `微信任务 task ${task.id}`);
+      task.pendingInstructions = Array.isArray(task.pendingInstructions) ? task.pendingInstructions : [];
+      if (task.alias && !isValidAlias(task.alias)) task.alias = "";
+    }
     if (Number.isInteger(numericId) && numericId >= nextTaskId) nextTaskId = numericId + 1;
   }
   return { tasks, nextTaskId: Math.max(1, nextTaskId) };
@@ -280,14 +324,6 @@ function saveTasks(state) {
     nextTaskId: normalized.nextTaskId,
     updatedAt: new Date().toISOString(),
   });
-}
-
-function allocateTaskId() {
-  const state = loadTasks();
-  const id = String(state.nextTaskId || 1);
-  state.nextTaskId = Number(id) + 1;
-  saveTasks(state);
-  return id;
 }
 
 function loadCurrentTasks() {
@@ -310,6 +346,7 @@ function findTaskByTarget(target) {
   const normalized = String(target || "").trim().replace(/^task\s+/i, "");
   return state.tasks.find((task) => {
     return String(task.id) === normalized
+      || String(task.alias || "") === normalized
       || String(task.pid || "") === normalized
       || task.tmuxSession === normalized;
   }) || null;
@@ -321,9 +358,16 @@ function getCurrentTask(fromUser) {
   return findTaskByTarget(target) || findTaskByTarget(DEFAULT_TASK_ID);
 }
 
-function setCurrentTask(fromUser, target) {
+function setCurrentTask(fromUser, target, options = {}) {
   const task = findTaskByTarget(target);
   if (!task) return { ok: false, message: `task ${target}: 不存在。发送 list 查看任务。` };
+  if (options.dryRun) {
+    return {
+      ok: true,
+      task,
+      message: [`task ${task.id}: 将切换`, `status=${task.status}`, `cwd=${task.cwd}`].join("\n"),
+    };
+  }
   const current = loadCurrentTasks();
   current.users[userKey(fromUser)] = {
     currentTask: String(task.id),
@@ -344,6 +388,119 @@ function updateTask(taskId, updater) {
   state.tasks[index] = updater({ ...state.tasks[index] });
   saveTasks(state);
   return state.tasks[index];
+}
+
+function createTaskSlot(taskId, fromUser = "", options = {}) {
+  const id = String(taskId);
+  const numericId = Number(id);
+  if (!Number.isInteger(numericId) || numericId < 1) {
+    return { ok: false, message: `task ${id}: 只能创建 task 1 及以后的数字任务。` };
+  }
+
+  const state = loadTasks();
+  const existing = state.tasks.find((task) => String(task.id) === id);
+  if (existing) return { ok: true, task: existing, created: false };
+
+  const nextId = Number(state.nextTaskId || 1);
+  if (numericId !== nextId) {
+    return { ok: false, message: `task ${id}: 不存在。只能创建 task ${nextId}，task id 必须每次加 1。` };
+  }
+
+  const cwd = fixedTaskCwd(id);
+  const task = {
+    id,
+    kind: "task",
+    intent: `微信任务 task ${id}`,
+    cwd,
+    status: "ready",
+    fromUser,
+    createdAt: new Date().toISOString(),
+    pendingInstructions: [],
+  };
+  if (options.dryRun) return { ok: true, task, created: true };
+
+  state.tasks.push(task);
+  state.nextTaskId = numericId + 1;
+  saveTasks(state);
+  return { ok: true, task, created: true };
+}
+
+function enterTask(target, fromUser = "", options = {}) {
+  const normalized = String(target || "").trim();
+  if (!normalized) return "缺少 task 编号或别名。用法：task 1";
+
+  if (/^\d+$/u.test(normalized)) {
+    const existing = findTaskByTarget(normalized);
+    let task = existing;
+    let created = false;
+    if (!task && normalized !== DEFAULT_TASK_ID) {
+      const result = createTaskSlot(normalized, fromUser, options);
+      if (!result.ok) return result.message;
+      task = result.task;
+      created = Boolean(result.created);
+    }
+    if (!task) return `task ${normalized}: 不存在。`;
+    if (options.dryRun && created) {
+      return [
+        taskHeader(task.id, "将创建并进入"),
+        `状态: ${task.status || "unknown"}`,
+        `目录: ${task.cwd}`,
+      ].join("\n");
+    }
+
+    const switched = setCurrentTask(fromUser, task.id, options);
+    if (!switched.ok) return switched.message;
+    return [
+      taskHeader(task.id, created ? "已创建并进入" : "已进入"),
+      `状态: ${task.status || "unknown"}`,
+      `目录: ${task.cwd}`,
+      task.alias ? `别名: ${task.alias}` : null,
+    ].filter(Boolean).join("\n");
+  }
+
+  const task = findTaskByTarget(normalized);
+  if (!task || !task.alias) return `task ${normalized}: 别名不存在。用 task alias N ${normalized} 设置。`;
+  const switched = setCurrentTask(fromUser, task.id, options);
+  if (!switched.ok) return switched.message;
+  return [
+    taskHeader(task.id, "已进入"),
+    `别名: ${task.alias}`,
+    `状态: ${task.status || "unknown"}`,
+    `目录: ${task.cwd}`,
+  ].join("\n");
+}
+
+function setTaskAlias(taskTarget, alias, options = {}) {
+  const name = String(alias || "").trim();
+  if (!isValidAlias(name)) {
+    return "别名无效。别名不能是纯数字、不能有空格，也不能使用 task/list/close/alias/unalias/pwd/ls。";
+  }
+  const task = findTaskByTarget(taskTarget);
+  if (!task) return `task ${taskTarget}: 不存在，先用 task ${taskTarget} 创建。`;
+  const conflict = findTaskByTarget(name);
+  if (conflict && String(conflict.id) !== String(task.id)) {
+    return `别名 ${name} 已被 task ${conflict.id} 使用。`;
+  }
+  if (options.dryRun) return `task ${task.id} · 将设置别名: ${name}`;
+  const updated = updateTask(task.id, (current) => ({
+    ...current,
+    alias: name,
+    updatedAt: new Date().toISOString(),
+  }));
+  return [`task ${updated.id} · 已设置别名`, `别名: ${updated.alias}`, `目录: ${updated.cwd}`].join("\n");
+}
+
+function unsetTaskAlias(target, options = {}) {
+  const task = findTaskByTarget(target);
+  if (!task || !task.alias) return `task ${target}: 未找到别名。`;
+  if (options.dryRun) return `task ${task.id} · 将移除别名: ${task.alias}`;
+  const oldAlias = task.alias;
+  const updated = updateTask(task.id, (current) => ({
+    ...current,
+    alias: "",
+    updatedAt: new Date().toISOString(),
+  }));
+  return [`task ${updated.id} · 已移除别名`, `原别名: ${oldAlias}`].join("\n");
 }
 
 function createId(prefix) {
@@ -421,6 +578,7 @@ function taskStatusText(status) {
   if (status === "running") return "运行中";
   if (status === "queued") return "排队中";
   if (status === "starting") return "启动中";
+  if (status === "ready") return "就绪";
   return status || "未知";
 }
 
@@ -1135,14 +1293,8 @@ function runSimpleCommand(task, command) {
 function formatDefaultTaskPrompt(instruction) {
   return [
     "You are task 0, the default Codex assistant behind a Weixin chat.",
-    "You decide whether the user's message can be answered directly, needs a short clarification, or should become a separate Codex subtask.",
-    "Do not use confirmation prompts as the main workflow.",
-    "",
-    "If a separate subtask should be started, include exactly one JSON object on its own line at the end of your final answer:",
-    '{"type":"create_task","cwd":"/absolute/workdir","prompt":"the full task instruction"}',
-    "",
-    "Use an existing absolute cwd when you can infer it. If you cannot infer a safe cwd, ask a concise clarification instead of creating a task.",
-    "If you answer directly or ask a clarification, do not include the JSON protocol.",
+    "Answer directly inside task 0. Do not create or request separate subtasks.",
+    "Task creation is controlled only by explicit Weixin commands such as task 1.",
     "To send an existing local image or file to Weixin, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
     "Use MEDIA only for files that already exist and are safe to share. Keep the directive on a separate line.",
     "",
@@ -1153,6 +1305,18 @@ function formatDefaultTaskPrompt(instruction) {
 
 function formatAppendPrompt(task, instruction) {
   if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction);
+  if (!task.codexSessionId && !task.resumeLast) {
+    return [
+      `You are Weixin-managed task ${task.id}.`,
+      task.alias ? `Task alias: ${task.alias}` : null,
+      `Working directory: ${task.cwd}`,
+      "",
+      "User instruction:",
+      instruction,
+      "",
+      "If your answer needs to send an existing local image or file, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
+    ].filter(Boolean).join("\n");
+  }
   return [
     `Continue the existing task ${task.id}.`,
     `Original task: ${task.intent}`,
@@ -1162,60 +1326,6 @@ function formatAppendPrompt(task, instruction) {
     "",
     "If your answer needs to send an existing local image or file, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
   ].join("\n");
-}
-
-function extractCreateTaskDirective(text) {
-  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i].replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
-    if (!line.startsWith("{") || !line.endsWith("}")) continue;
-    try {
-      const parsed = JSON.parse(line);
-      if (parsed?.type === "create_task" && parsed.cwd && parsed.prompt) return parsed;
-    } catch {
-      // Ignore non-protocol JSON-like text.
-    }
-  }
-  return null;
-}
-
-function createNumberedTask({ prompt, cwd, fromUser = "", kind = "subtask", parentTaskId = DEFAULT_TASK_ID, config }) {
-  const resolvedCwd = expandHome(cwd);
-  try {
-    if (!fs.statSync(resolvedCwd).isDirectory()) {
-      return { ok: false, message: `task ${parentTaskId}: 子任务目录不存在：${resolvedCwd}` };
-    }
-  } catch {
-    return { ok: false, message: `task ${parentTaskId}: 子任务目录不存在：${resolvedCwd}` };
-  }
-
-  const task = {
-    id: allocateTaskId(),
-    kind,
-    parentTaskId,
-    intent: prompt,
-    cwd: resolvedCwd,
-    status: "starting",
-    fromUser,
-    createdAt: new Date().toISOString(),
-    pendingInstructions: [],
-  };
-  const state = loadTasks();
-  state.tasks.unshift(task);
-  saveTasks(state);
-  const run = startCodexRun({ task, prompt, config });
-  return {
-    ok: true,
-    task: { ...task, pid: run.pid },
-    message: isVerboseTaskReplies(config)
-      ? [
-        taskHeader(parentTaskId, `已创建 task ${task.id}`),
-        `cwd: ${task.cwd}`,
-        run.tmuxSession ? `tmux: ${run.tmuxSession}` : null,
-        run.pid ? `pid: ${run.pid}` : null,
-      ].filter(Boolean).join("\n")
-      : [taskHeader(parentTaskId, `已创建 task ${task.id}`), `cwd: ${task.cwd}`].join("\n"),
-  };
 }
 
 async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
@@ -1259,19 +1369,6 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   }
 
   const last = readLastMessage(latest);
-  const directive = String(latest.id) === DEFAULT_TASK_ID ? extractCreateTaskDirective(last) : null;
-  if (directive) {
-    const created = createNumberedTask({
-      prompt: directive.prompt,
-      cwd: directive.cwd,
-      fromUser: latest.fromUser || "",
-      parentTaskId: latest.id,
-      config,
-    });
-    await sendText(created.message, config);
-    return latest;
-  }
-
   const statusText = taskStatusText(latest.status);
   const lines = [taskHeader(latest.id, statusText)];
   if (latest.status !== "completed") lines.push(`exit: ${numericExit === null ? signal || "unknown" : numericExit}`);
@@ -1325,16 +1422,19 @@ function forwardToTask(task, text, config, fromUser = "") {
 }
 
 function closeTaskTargets(targets, fromUser = "", options = {}) {
-  const ids = [...new Set(targets.map((target) => String(target).trim()).filter(Boolean))];
-  if (ids.length === 0) return "没有指定要关闭的 task。用法：close task 1";
+  const ids = targets.map((target) => String(target).trim()).filter(Boolean);
+  if (ids.length === 0) return "没有指定要关闭的 task。用法：task close 1";
 
   const lines = [];
+  const seenTaskIds = new Set();
   for (const id of ids) {
     const task = findTaskByTarget(id);
     if (!task) {
       lines.push(`task ${id} · 不存在`);
       continue;
     }
+    if (seenTaskIds.has(String(task.id))) continue;
+    seenTaskIds.add(String(task.id));
     if (String(task.id) === DEFAULT_TASK_ID) {
       lines.push("task 0 · 默认任务不能关闭");
       continue;
@@ -1429,9 +1529,10 @@ function formatTaskBlock(task, fromUser = "") {
   if (String(current?.id) === String(task.id)) tags.push("current");
   const lines = [
     `task ${task.id} [${tags.join(",")}]`,
+    task.alias ? `别名: ${task.alias}` : null,
     `状态: ${task.status || "unknown"}`,
     `目录: ${task.cwd}`,
-  ];
+  ].filter(Boolean);
   if (task.intent) lines.push(`摘要: ${compact(task.intent, 80)}`);
   return lines.join("\n");
 }
@@ -1447,21 +1548,27 @@ async function formatList(fromUser = "") {
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
   if (/^list$/iu.test(trimmed)) return { type: "list" };
-  const closeMatch = trimmed.match(/^(?:close|stop|kill|关闭|停止)\s+(.+)$/iu);
+  const aliasMatch = trimmed.match(/^task\s+alias\s+(\S+)\s+(\S+)$/iu);
+  if (aliasMatch) return { type: "alias", target: aliasMatch[1], alias: aliasMatch[2] };
+  const unaliasMatch = trimmed.match(/^task\s+unalias\s+(\S+)$/iu);
+  if (unaliasMatch) return { type: "unalias", target: unaliasMatch[1] };
+  const closeMatch = trimmed.match(/^task\s+close\s+(.+)$/iu);
   if (closeMatch) {
-    const targets = [...closeMatch[1].matchAll(/(?:task\s*)?(\d+)/giu)].map((match) => match[1]);
+    const targets = closeMatch[1].split(/\s+/u).filter(Boolean);
     return { type: "close", targets };
   }
-  const taskMatch = trimmed.match(/^task\s+(\d+)$/iu);
-  if (taskMatch) return { type: "switch", id: taskMatch[1] };
+  const taskMatch = trimmed.match(/^task\s+(\S+)$/iu);
+  if (taskMatch) return { type: "enter", target: taskMatch[1] };
   return { type: "message", text: trimmed };
 }
 
 async function handleText(text, fromUser, config) {
   const command = parseCommand(text);
   if (command.type === "list") return formatList(fromUser);
+  if (command.type === "alias") return setTaskAlias(command.target, command.alias, { dryRun: Boolean(config.dryRun) });
+  if (command.type === "unalias") return unsetTaskAlias(command.target, { dryRun: Boolean(config.dryRun) });
   if (command.type === "close") return closeTaskTargets(command.targets, fromUser, { dryRun: Boolean(config.dryRun) });
-  if (command.type === "switch") return setCurrentTask(fromUser, command.id).message;
+  if (command.type === "enter") return enterTask(command.target, fromUser, { dryRun: Boolean(config.dryRun) });
 
   const task = getCurrentTask(fromUser);
   if (!task) return "task 0: 状态异常，未找到默认任务。";
