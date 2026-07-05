@@ -82,6 +82,18 @@ Start the command router after pairing and binding:
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs
 ```
 
+Or start it in the fixed tmux router session:
+
+```bash
+/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
+```
+
+The start script is idempotent: it starts `codex-wx-router` only when that tmux session is missing. It is safe to call from PowerShell, WSL login startup, or Windows Task Scheduler:
+
+```powershell
+wsl.exe -- bash -lc "/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh"
+```
+
 The router stores state in:
 
 ```text

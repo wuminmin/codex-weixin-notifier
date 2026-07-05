@@ -69,6 +69,14 @@ Start the command router after pairing and binding:
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs
 ```
 
+Use the fixed tmux startup wrapper for WSL startup or Windows Task Scheduler:
+
+```bash
+/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
+```
+
+It is idempotent and only starts `codex-wx-router` when that tmux session is missing.
+
 Supported inbound Weixin commands:
 
 - `list`: list numbered tasks.
