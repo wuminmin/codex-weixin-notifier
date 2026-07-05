@@ -39,6 +39,7 @@ const MEDIA_TYPE_FILE = 3;
 const INBOUND_MEDIA_DIR = "inbox";
 const DEFAULT_INTERACTIVE_CAPTURE_DELAY_MS = 3000;
 const DEFAULT_INTERACTIVE_CAPTURE_LINES = 120;
+const DEFAULT_INTERACTIVE_READY_TIMEOUT_MS = 20000;
 
 const EXTENSION_TO_MIME = {
   ".bmp": "image/bmp",
@@ -1371,6 +1372,10 @@ function interactiveCaptureLines(config) {
   return Number(valueFrom(config.interactiveCaptureLines, process.env.CODEX_WEIXIN_INTERACTIVE_CAPTURE_LINES, DEFAULT_INTERACTIVE_CAPTURE_LINES));
 }
 
+function interactiveReadyTimeoutMs(config) {
+  return Number(valueFrom(config.interactiveReadyTimeoutMs, process.env.CODEX_WEIXIN_INTERACTIVE_READY_TIMEOUT_MS, DEFAULT_INTERACTIVE_READY_TIMEOUT_MS));
+}
+
 function captureTmuxPane(sessionName, config) {
   const lines = Math.max(20, interactiveCaptureLines(config));
   const result = spawnSync("tmux", ["capture-pane", "-pt", sessionName, "-S", `-${lines}`], {
@@ -1381,6 +1386,55 @@ function captureTmuxPane(sessionName, config) {
     throw new Error(`tmux capture-pane failed: ${result.stderr || result.stdout || `exit ${result.status}`}`);
   }
   return result.stdout.trimEnd();
+}
+
+function stripAnsi(text) {
+  return String(text || "").replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function cleanInteractiveCapture(text) {
+  const lines = stripAnsi(text).split(/\r?\n/).map((line) => line.trimEnd());
+  return lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (/^[╭╮╰╯│─\s]+$/u.test(trimmed)) return false;
+    if (/^>_ OpenAI Codex/u.test(trimmed)) return false;
+    if (/^model:\s+/u.test(trimmed)) return false;
+    if (/^directory:\s+/u.test(trimmed)) return false;
+    if (/^Tip:/u.test(trimmed)) return false;
+    if (/^• You have /u.test(trimmed)) return false;
+    if (/^[◦⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*Booting MCP server/u.test(trimmed)) return false;
+    if (/^gpt-[\w.-]+.*·/u.test(trimmed)) return false;
+    return true;
+  }).join("\n").trim();
+}
+
+function captureAfterPrevious(sessionName, previousCleaned, config) {
+  const cleaned = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
+  if (!previousCleaned) return cleaned;
+  if (cleaned.startsWith(previousCleaned)) return cleaned.slice(previousCleaned.length).trim();
+  const previousLines = previousCleaned.split("\n").filter(Boolean);
+  for (let count = Math.min(previousLines.length, 20); count > 0; count -= 1) {
+    const tail = previousLines.slice(-count).join("\n");
+    const index = cleaned.lastIndexOf(tail);
+    if (index !== -1) return cleaned.slice(index + tail.length).trim();
+  }
+  return cleaned;
+}
+
+function paneLooksReady(text) {
+  const cleaned = cleanInteractiveCapture(text);
+  return /(?:^|\n)›\s*/u.test(cleaned) || /(?:^|\n)>\s*$/u.test(cleaned) || /gpt-[\w.-]+.*·/u.test(stripAnsi(text));
+}
+
+function waitForInteractiveReady(sessionName, config) {
+  const deadline = Date.now() + interactiveReadyTimeoutMs(config);
+  while (Date.now() < deadline) {
+    const pane = captureTmuxPane(sessionName, config);
+    if (paneLooksReady(pane)) return true;
+    sleepSync(500);
+  }
+  return false;
 }
 
 function ensureInteractiveSession(task, config, imagePaths = []) {
@@ -1483,9 +1537,11 @@ function sendInteractiveInstruction(task, text, attachments, config) {
     ].filter(Boolean).join("\n");
   }
   const { sessionName, started } = ensureInteractiveSession(task, config, imagePaths);
+  waitForInteractiveReady(sessionName, config);
+  const before = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
   sendTextToTmux(sessionName, mapped);
   sleepSync(interactiveCaptureDelayMs(config));
-  const output = captureTmuxPane(sessionName, config);
+  const output = captureAfterPrevious(sessionName, before, config);
   return [
     taskHeader(task.id, started ? "interactive 已启动并发送" : "interactive 已发送"),
     `会话: ${sessionName}`,
