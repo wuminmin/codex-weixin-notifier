@@ -1534,20 +1534,18 @@ function mapInteractiveCommand(text, attachments = []) {
 }
 
 function sendTextToTmux(sessionName, text) {
-  const bufferName = `codex-wx-${crypto.randomBytes(4).toString("hex")}`;
-  const load = spawnSync("tmux", ["load-buffer", "-b", bufferName, "-"], {
-    input: text,
-    encoding: "utf8",
-  });
-  if (load.status !== 0) {
-    throw new Error(`tmux load-buffer failed: ${load.stderr || load.stdout || `exit ${load.status}`}`);
+  const normalized = String(text || "").replace(/\r?\n+/gu, " ").replace(/\s+/gu, " ").trim();
+  const clear = spawnSync("tmux", ["send-keys", "-t", sessionName, "C-u"], { encoding: "utf8" });
+  if (clear.status !== 0) {
+    throw new Error(`tmux clear composer failed: ${clear.stderr || clear.stdout || `exit ${clear.status}`}`);
   }
-  const paste = spawnSync("tmux", ["paste-buffer", "-b", bufferName, "-t", sessionName], { encoding: "utf8" });
-  spawnSync("tmux", ["delete-buffer", "-b", bufferName], { encoding: "utf8" });
-  if (paste.status !== 0) {
-    throw new Error(`tmux paste-buffer failed: ${paste.stderr || paste.stdout || `exit ${paste.status}`}`);
+  sleepSync(100);
+  const type = spawnSync("tmux", ["send-keys", "-t", sessionName, "-l", normalized], { encoding: "utf8" });
+  if (type.status !== 0) {
+    throw new Error(`tmux send literal failed: ${type.stderr || type.stdout || `exit ${type.status}`}`);
   }
-  const enter = spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"], { encoding: "utf8" });
+  sleepSync(150);
+  const enter = spawnSync("tmux", ["send-keys", "-t", sessionName, "C-m"], { encoding: "utf8" });
   if (enter.status !== 0) {
     throw new Error(`tmux send-keys failed: ${enter.stderr || enter.stdout || `exit ${enter.status}`}`);
   }
@@ -1570,7 +1568,11 @@ function sendInteractiveInstruction(task, text, attachments, config) {
   const before = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
   sendTextToTmux(sessionName, mapped);
   sleepSync(interactiveCaptureDelayMs(config));
-  const output = waitForInteractiveResponse(sessionName, before, config);
+  let output = waitForInteractiveResponse(sessionName, before, config);
+  if (!output) {
+    spawnSync("tmux", ["send-keys", "-t", sessionName, "C-m"], { encoding: "utf8" });
+    output = waitForInteractiveResponse(sessionName, before, config);
+  }
   return [
     taskHeader(task.id, started ? "interactive 已启动并发送" : "interactive 已发送"),
     `会话: ${sessionName}`,
