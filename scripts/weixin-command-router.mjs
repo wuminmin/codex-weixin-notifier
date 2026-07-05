@@ -994,6 +994,7 @@ function codexArgGroups(config) {
     : splitWords(process.env.CODEX_WEIXIN_CODEX_ARGS);
   const globalArgs = [...configuredGlobal];
   const execArgs = [];
+  const configuredAnyArgs = configuredGlobal.length > 0 || configured.length > 0;
 
   for (let i = 0; i < configured.length; i += 1) {
     const arg = configured[i];
@@ -1009,14 +1010,44 @@ function codexArgGroups(config) {
       }
       continue;
     }
+    if (arg.startsWith("--sandbox=") || arg.startsWith("-s=")) {
+      globalArgs.push(arg);
+      continue;
+    }
+    if (arg === "--sandbox" || arg === "-s") {
+      globalArgs.push(arg);
+      if (configured[i + 1]) {
+        globalArgs.push(configured[i + 1]);
+        i += 1;
+      }
+      continue;
+    }
+    if (arg === "--dangerously-bypass-approvals-and-sandbox") {
+      globalArgs.push(arg);
+      continue;
+    }
     execArgs.push(arg);
   }
 
-  if (!globalArgs.length && !execArgs.length) {
-    return {
-      globalArgs: ["--ask-for-approval", "never"],
-      execArgs: ["--json", "--skip-git-repo-check"],
-    };
+  const hasArg = (name, shortName = "") => globalArgs.some((arg) => {
+    return arg === name || arg.startsWith(`${name}=`) || (shortName && (arg === shortName || arg.startsWith(`${shortName}=`)));
+  });
+  const bypassSandbox = process.env.CODEX_WEIXIN_CODEX_BYPASS_SANDBOX === "1"
+    || config.codexBypassSandbox === true
+    || config.dangerouslyBypassApprovalsAndSandbox === true;
+  if (bypassSandbox) {
+    if (!globalArgs.includes("--dangerously-bypass-approvals-and-sandbox")) {
+      globalArgs.push("--dangerously-bypass-approvals-and-sandbox");
+    }
+  } else if (!hasArg("--sandbox", "-s")) {
+    globalArgs.push("--sandbox", valueFrom(process.env.CODEX_WEIXIN_CODEX_SANDBOX, config.codexSandbox, "workspace-write"));
+  }
+  if (!bypassSandbox && !hasArg("--ask-for-approval", "-a")) {
+    globalArgs.push("--ask-for-approval", "never");
+  }
+
+  if (!configuredAnyArgs && execArgs.length === 0) {
+    execArgs.push("--json", "--skip-git-repo-check");
   }
 
   return { globalArgs, execArgs };

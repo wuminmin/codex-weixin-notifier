@@ -206,10 +206,13 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 ```json
 {
   "codexCommand": "codex",
-  "codexGlobalArgs": ["--ask-for-approval", "never"],
+  "codexSandbox": "workspace-write",
+  "codexGlobalArgs": ["--ask-for-approval", "never", "--sandbox", "workspace-write"],
   "codexArgs": ["--json", "--skip-git-repo-check"]
 }
 ```
+
+By default, Weixin tasks run child Codex with `--sandbox workspace-write`, which can write the fixed task directory `~/codex/taskN` and temporary files while still avoiding full WSL access. To intentionally run child Codex without sandboxing, set `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` or `"codexBypassSandbox": true`; this is dangerous because a Weixin message can then trigger writes anywhere the WSL user can access.
 
 `runner` defaults to `tmux` when tmux is installed, and falls back to direct `spawn` otherwise. tmux tasks keep an attachable session open after Codex exits so you can inspect the terminal:
 
@@ -217,7 +220,7 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 tmux attach -t codex-wx-task-...
 ```
 
-All task working directories are fixed under `~/codex/taskN`. `CODEX_WEIXIN_TASK_ROOT` can override the root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
+All task working directories are fixed under `~/codex/taskN`. `CODEX_WEIXIN_TASK_ROOT` can override the root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
 
 ## Media Replies
 

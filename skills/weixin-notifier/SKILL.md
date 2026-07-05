@@ -53,6 +53,8 @@ Environment variables override missing config values:
 - `CODEX_PRODUCT`
 - `CODEX_WEIXIN_WORKSPACE_ROOT`
 - `CODEX_WEIXIN_CODEX_COMMAND`
+- `CODEX_WEIXIN_CODEX_SANDBOX`
+- `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`
 - `CODEX_WEIXIN_CODEX_ARGS`
 - `CODEX_WEIXIN_MEDIA_ROOTS`
 - `CODEX_WEIXIN_MAX_MEDIA_BYTES`
@@ -87,6 +89,7 @@ Important behavior:
 - `task reset ...` refuses running, starting, or queued tasks; close them first with `task close ...`.
 - tmux runner sessions are fixed by task id, such as `codex-wx-task-0` and `codex-wx-task-1`; completed runs close by default unless `CODEX_WEIXIN_KEEP_TMUX_OPEN=1` or `keepTmuxOpen: true` is set.
 - `task tmux clean` only removes legacy per-run sessions named like `codex-wx-task-1-wxrun-...` or `codex-wx-task-1-wxr-...`; it does not remove `codex-wx-router` or fixed task sessions.
+- Child Codex runs default to `--sandbox workspace-write`; use `CODEX_WEIXIN_CODEX_SANDBOX` / `codexSandbox` to change the sandbox mode, or `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true` only when intentionally allowing unsandboxed WSL access.
 - The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.
 - Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
 - To send a local image or file back to Weixin, the Codex task should put `MEDIA:/absolute/path/to/file` on its own line. Images are sent as image messages; other supported files are sent as file attachments.
