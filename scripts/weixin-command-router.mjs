@@ -24,11 +24,43 @@ const MESSAGE_TYPE_USER = 1;
 const MESSAGE_TYPE_BOT = 2;
 const MESSAGE_STATE_FINISH = 2;
 const MESSAGE_ITEM_TEXT = 1;
+const MESSAGE_ITEM_IMAGE = 2;
+const MESSAGE_ITEM_FILE = 4;
 const ILINK_APP_ID = "bot";
 const ILINK_APP_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 6);
 const DEFAULT_RUNNER = "tmux";
 const DEFAULT_TASK_ID = "0";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
+const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
+const MEDIA_TYPE_IMAGE = 1;
+const MEDIA_TYPE_FILE = 3;
+
+const EXTENSION_TO_MIME = {
+  ".bmp": "image/bmp",
+  ".csv": "text/csv",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".gif": "image/gif",
+  ".gz": "application/gzip",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".json": "application/json",
+  ".log": "text/plain",
+  ".md": "text/markdown",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".tar": "application/x-tar",
+  ".txt": "text/plain",
+  ".webp": "image/webp",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".zip": "application/zip",
+};
+
+const IMAGE_MIME_PREFIX = "image/";
 
 const runtimeChildren = new Map();
 
@@ -332,6 +364,48 @@ function compactLines(text, max = 1200) {
   return `${value.slice(0, max - 3).trimEnd()}...`;
 }
 
+function getMimeFromFilename(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  return EXTENSION_TO_MIME[ext] || "application/octet-stream";
+}
+
+function isImageFile(filePath) {
+  return getMimeFromFilename(filePath).startsWith(IMAGE_MIME_PREFIX);
+}
+
+function mediaRoots(config) {
+  const configured = Array.isArray(config.mediaRoots)
+    ? config.mediaRoots
+    : splitWords(process.env.CODEX_WEIXIN_MEDIA_ROOTS);
+  const roots = configured.length ? configured : [os.homedir(), "/tmp"];
+  return roots.map((root) => path.resolve(expandHome(root)));
+}
+
+function ensureMediaAllowed(filePath, config) {
+  const resolved = path.resolve(expandHome(filePath));
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile()) throw new Error(`媒体路径不是文件：${resolved}`);
+  const maxBytes = Number(valueFrom(config.maxMediaBytes, process.env.CODEX_WEIXIN_MAX_MEDIA_BYTES, MAX_MEDIA_BYTES));
+  if (stat.size > maxBytes) throw new Error(`媒体文件过大：${stat.size} bytes > ${maxBytes} bytes`);
+  const roots = mediaRoots(config);
+  const allowed = roots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+  if (!allowed) throw new Error(`媒体路径不在允许目录内：${resolved}`);
+  return { filePath: resolved, stat };
+}
+
+function aesEcbPaddedSize(plaintextSize) {
+  return Math.ceil((plaintextSize + 1) / 16) * 16;
+}
+
+function encryptAesEcb(plaintext, key) {
+  const cipher = crypto.createCipheriv("aes-128-ecb", key, null);
+  return Buffer.concat([cipher.update(plaintext), cipher.final()]);
+}
+
+function buildCdnUploadUrl({ cdnBaseUrl, uploadParam, filekey }) {
+  return `${cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`;
+}
+
 function isVerboseTaskReplies(config) {
   return config.verboseTaskReplies === true || process.env.CODEX_WEIXIN_VERBOSE_TASK_REPLIES === "1";
 }
@@ -474,6 +548,201 @@ async function sendText(text, config, args = {}) {
       },
     },
   });
+}
+
+async function getUploadUrl({ filePath, toUser, mediaType, config, stat, aeskey, filekey }) {
+  const plaintext = fs.readFileSync(filePath);
+  const body = {
+    filekey,
+    media_type: mediaType,
+    to_user_id: toUser,
+    rawsize: stat.size,
+    rawfilemd5: crypto.createHash("md5").update(plaintext).digest("hex"),
+    filesize: aesEcbPaddedSize(stat.size),
+    no_need_thumb: true,
+    aeskey: aeskey.toString("hex"),
+    base_info: {
+      channel_version: "2.4.6",
+      bot_agent: "CodexWeixinNotifier/0.1.0",
+    },
+  };
+  const response = await postJson({
+    baseUrl: config.baseUrl || DEFAULT_ILINK_BASE_URL,
+    endpoint: "ilink/bot/getuploadurl",
+    token: valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN),
+    timeoutMs: Number(valueFrom(config.timeoutMs, 15000)),
+    body,
+  });
+  if (response?.ret && response.ret !== 0) {
+    throw new Error(`getuploadurl failed: ret=${response.ret} errmsg=${response.errmsg || "(none)"}`);
+  }
+  return { response, plaintext, ciphertextSize: body.filesize };
+}
+
+async function uploadBufferToCdn({ plaintext, uploadUrl, uploadParam, filekey, aeskey, config }) {
+  const cdnBaseUrl = valueFrom(config.cdnBaseUrl, process.env.WEIXIN_CDN_BASE_URL, DEFAULT_CDN_BASE_URL);
+  const target = uploadUrl?.trim() || buildCdnUploadUrl({ cdnBaseUrl, uploadParam, filekey });
+  const ciphertext = encryptAesEcb(plaintext, aeskey);
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(target, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: new Uint8Array(ciphertext),
+      });
+      if (response.status !== 200) {
+        const body = await response.text();
+        throw new Error(`CDN upload failed: HTTP ${response.status} ${body}`);
+      }
+      const encryptedParam = response.headers.get("x-encrypted-param");
+      if (!encryptedParam) throw new Error("CDN upload response missing x-encrypted-param");
+      return encryptedParam;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 3) break;
+    }
+  }
+  throw lastError || new Error("CDN upload failed");
+}
+
+async function uploadMediaFile(filePath, config) {
+  const { filePath: resolved, stat } = ensureMediaAllowed(filePath, config);
+  const token = valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN);
+  const toUser = valueFrom(config.toUser, config.userId, process.env.WEIXIN_TO_USER);
+  if (!token) throw new Error("Missing Weixin iLink token. Run pair-weixin.mjs first.");
+  if (!toUser) throw new Error("Missing Weixin recipient. Run bind-recipient.mjs first.");
+
+  const image = isImageFile(resolved);
+  const mediaType = image ? MEDIA_TYPE_IMAGE : MEDIA_TYPE_FILE;
+  const aeskey = crypto.randomBytes(16);
+  const filekey = crypto.randomBytes(16).toString("hex");
+  const { response, plaintext, ciphertextSize } = await getUploadUrl({
+    filePath: resolved,
+    toUser,
+    mediaType,
+    config,
+    stat,
+    aeskey,
+    filekey,
+  });
+  const uploadParam = response.upload_param;
+  const uploadUrl = response.upload_full_url;
+  if (!uploadUrl && !uploadParam) throw new Error("getuploadurl returned no upload URL");
+  const downloadEncryptedQueryParam = await uploadBufferToCdn({
+    plaintext,
+    uploadUrl,
+    uploadParam,
+    filekey,
+    aeskey,
+    config,
+  });
+  return {
+    filePath: resolved,
+    fileName: path.basename(resolved),
+    image,
+    fileSize: stat.size,
+    fileSizeCiphertext: ciphertextSize,
+    media: {
+      encrypt_query_param: downloadEncryptedQueryParam,
+      aes_key: Buffer.from(aeskey.toString("hex")).toString("base64"),
+      encrypt_type: 1,
+    },
+  };
+}
+
+async function sendOfficialMessageItem(item, config) {
+  const token = valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN);
+  const toUser = valueFrom(config.toUser, config.userId, process.env.WEIXIN_TO_USER);
+  const contextToken = valueFrom(config.contextToken, process.env.WEIXIN_CONTEXT_TOKEN);
+  if (!token) throw new Error("Missing Weixin iLink token. Run pair-weixin.mjs first.");
+  if (!toUser) throw new Error("Missing Weixin recipient. Run bind-recipient.mjs first.");
+  if (!contextToken) throw new Error("Missing contextToken. Send a message to the bot, then run bind-recipient.mjs.");
+
+  const response = await postJson({
+    baseUrl: config.baseUrl || DEFAULT_ILINK_BASE_URL,
+    endpoint: "ilink/bot/sendmessage",
+    token,
+    timeoutMs: Number(valueFrom(config.timeoutMs, 15000)),
+    body: {
+      msg: {
+        from_user_id: "",
+        to_user_id: toUser,
+        client_id: `codex-command-${Date.now()}-${crypto.randomBytes(2).toString("hex")}`,
+        message_type: MESSAGE_TYPE_BOT,
+        message_state: MESSAGE_STATE_FINISH,
+        item_list: [item],
+        context_token: contextToken,
+      },
+      base_info: {
+        channel_version: "2.4.6",
+        bot_agent: "CodexWeixinNotifier/0.1.0",
+      },
+    },
+  });
+  if (response?.ret && response.ret !== 0) {
+    throw new Error(`sendmessage failed: ret=${response.ret} errmsg=${response.errmsg || "(none)"}`);
+  }
+}
+
+function mediaItemFromUpload(uploaded) {
+  if (uploaded.image) {
+    return {
+      type: MESSAGE_ITEM_IMAGE,
+      image_item: {
+        media: uploaded.media,
+        mid_size: uploaded.fileSizeCiphertext,
+      },
+    };
+  }
+  return {
+    type: MESSAGE_ITEM_FILE,
+    file_item: {
+      media: uploaded.media,
+      file_name: uploaded.fileName,
+      len: String(uploaded.fileSize),
+    },
+  };
+}
+
+async function sendMediaFile(filePath, config, args = {}) {
+  if (isDryRun(args, config)) {
+    const { filePath: resolved, stat } = ensureMediaAllowed(filePath, config);
+    process.stdout.write(`[dry-run media] ${isImageFile(resolved) ? "image" : "file"} ${resolved} ${stat.size} bytes\n`);
+    return;
+  }
+  if (config.endpoint || process.env.WEIXIN_ILINK_ENDPOINT) {
+    throw new Error("Media sending requires official iLink login transport, not a custom WEIXIN_ILINK_ENDPOINT.");
+  }
+  const uploaded = await uploadMediaFile(filePath, config);
+  await sendOfficialMessageItem(mediaItemFromUpload(uploaded), config);
+}
+
+function extractMediaDirectives(text) {
+  const media = [];
+  const kept = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:MEDIA|IMAGE|FILE)\s*:\s*(.+?)\s*$/iu);
+    if (!match) {
+      kept.push(line);
+      continue;
+    }
+    media.push(match[1].replace(/^file:\/\//u, "").trim());
+  }
+  return { text: kept.join("\n").trim(), media };
+}
+
+async function sendTextWithMedia(text, config, args = {}) {
+  const parsed = extractMediaDirectives(text);
+  if (parsed.text) await sendText(parsed.text, config, args);
+  for (const filePath of parsed.media) {
+    try {
+      await sendMediaFile(filePath, config, args);
+    } catch (error) {
+      await sendText(`媒体发送失败：${filePath}\n${error.message}`, config, args);
+    }
+  }
+  if (!parsed.text && parsed.media.length === 0) await sendText(text, config, args);
 }
 
 function extractSessionId(value) {
@@ -862,6 +1131,8 @@ function formatDefaultTaskPrompt(instruction) {
     "",
     "Use an existing absolute cwd when you can infer it. If you cannot infer a safe cwd, ask a concise clarification instead of creating a task.",
     "If you answer directly or ask a clarification, do not include the JSON protocol.",
+    "To send an existing local image or file to Weixin, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
+    "Use MEDIA only for files that already exist and are safe to share. Keep the directive on a separate line.",
     "",
     "Weixin user message:",
     instruction,
@@ -876,6 +1147,8 @@ function formatAppendPrompt(task, instruction) {
     "",
     "Additional instruction from Weixin:",
     instruction,
+    "",
+    "If your answer needs to send an existing local image or file, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
   ].join("\n");
 }
 
@@ -995,7 +1268,7 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
     if (latest.tmuxSession) lines.push(`tmux: ${latest.tmuxSession}`);
   }
   if (last) lines.push("", compactLines(last, 1200));
-  await sendText(lines.join("\n"), config);
+  await sendTextWithMedia(lines.join("\n"), config);
   return latest;
 }
 
@@ -1065,17 +1338,19 @@ function pruneDeadTasks() {
   return state;
 }
 
-function formatTaskLine(task, fromUser = "") {
+function formatTaskBlock(task, fromUser = "") {
   const current = getCurrentTask(fromUser);
   const tags = [];
   if (String(task.id) === DEFAULT_TASK_ID) tags.push("default");
   else tags.push(task.status || "unknown");
   if (String(current?.id) === String(task.id)) tags.push("current");
-  return [
+  const lines = [
     `task ${task.id} [${tags.join(",")}]`,
-    `cwd=${task.cwd}`,
-    task.intent ? compact(task.intent, 120) : null,
-  ].filter(Boolean).join(" ");
+    `状态: ${task.status || "unknown"}`,
+    `目录: ${task.cwd}`,
+  ];
+  if (task.intent) lines.push(`摘要: ${compact(task.intent, 80)}`);
+  return lines.join("\n");
 }
 
 async function formatList(fromUser = "") {
@@ -1083,7 +1358,7 @@ async function formatList(fromUser = "") {
   const ordered = state.tasks
     .slice()
     .sort((a, b) => Number(a.id) - Number(b.id));
-  return ordered.map((task) => formatTaskLine(task, fromUser)).join("\n");
+  return ordered.map((task) => formatTaskBlock(task, fromUser)).join("\n\n");
 }
 
 function parseCommand(text) {
@@ -1127,7 +1402,7 @@ async function runPoll(args, config) {
         rememberRecipientContext(config, message, sync);
         const replyTarget = getReplyTarget(message, config);
         const response = await handleText(text, replyTarget, config);
-        await sendText(response, {
+        await sendTextWithMedia(response, {
           ...config,
           toUser: replyTarget || config.toUser,
           contextToken: message.context_token || config.contextToken,
@@ -1144,8 +1419,13 @@ async function runPoll(args, config) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig(args);
-  saveTasks(loadTasks());
 
+  if (args["send-media"]) {
+    await sendTextWithMedia(`${args.message || ""}\nMEDIA:${args["send-media"]}`.trim(), config, args);
+    return;
+  }
+
+  saveTasks(loadTasks());
   if (args["complete-task"] === "true") {
     await completeTask({
       taskId: valueFrom(args["task-id"], args.task),

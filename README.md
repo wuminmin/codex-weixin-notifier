@@ -132,8 +132,15 @@ Subtasks are created only by `task 0` through an internal protocol emitted by th
 `list` shows the numbered task list with current/default markers:
 
 ```text
-task 0 [default,current] cwd=/home/user 默认 Codex 助理
-task 1 [running] cwd=/path/to/codex-weixin-notifier 修改微信路由
+task 0 [default,current]
+状态: default
+目录: /home/user
+摘要: 默认 Codex 助理
+
+task 1 [running]
+状态: running
+目录: /path/to/codex-weixin-notifier
+摘要: 修改微信路由
 ```
 
 Local smoke checks:
@@ -164,6 +171,39 @@ tmux attach -t codex-wx-task-...
 ```
 
 `task 0` defaults to the WSL home directory. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_DEFAULT_CWD`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override those fields.
+
+## Media Replies
+
+The command router can send local images and file attachments back to Weixin when a Codex task includes a media directive on its own line:
+
+```text
+Here is the screenshot.
+MEDIA:/tmp/screenshot.png
+```
+
+Supported behavior:
+
+- Image files such as `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, and `.bmp` are sent as Weixin image messages.
+- Other allowed files such as `.txt`, `.log`, `.json`, `.pdf`, `.zip`, Office documents, and archives are sent as Weixin file attachments.
+- Media is uploaded through the official iLink `getuploadurl` plus Weixin CDN flow before `sendmessage`.
+- If upload or send fails, the router sends a text fallback describing the failed path and error.
+
+Safety limits:
+
+- Files must be under `~` or `/tmp` by default.
+- Override allowed roots with `CODEX_WEIXIN_MEDIA_ROOTS` or `mediaRoots` in `~/.codex/weixin-notifier.json`.
+- Files are limited to 20 MB by default.
+- Override the limit with `CODEX_WEIXIN_MAX_MEDIA_BYTES` or `maxMediaBytes`.
+- If your account uses a non-default CDN URL, set `WEIXIN_CDN_BASE_URL` or `cdnBaseUrl`.
+
+Dry-run a local media path without uploading:
+
+```bash
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --dry-run \
+  --send-media /tmp/screenshot.png \
+  --message "screenshot test"
+```
 
 ## Completion Hook Shape
 

@@ -14,6 +14,7 @@ The plugin separates the completion event from the Weixin transport:
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
 - `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks.
 - `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N`, and forwards ordinary text to the selected task.
+- `scripts/weixin-command-router.mjs` also sends local images and file attachments when a Codex task emits a `MEDIA:/absolute/path` directive on its own line.
 - Each notification carries a `sessionId`, `source`, `workspace`, `task`, `status`, and completion time.
 - Multiple Codex processes are separated by an explicit session id when available; otherwise the sender derives a short id from process and workspace context.
 - Secrets are read from `~/.codex/weixin-notifier.json` or environment variables, never from prompts.
@@ -53,6 +54,9 @@ Environment variables override missing config values:
 - `CODEX_WEIXIN_WORKSPACE_ROOT`
 - `CODEX_WEIXIN_CODEX_COMMAND`
 - `CODEX_WEIXIN_CODEX_ARGS`
+- `CODEX_WEIXIN_MEDIA_ROOTS`
+- `CODEX_WEIXIN_MAX_MEDIA_BYTES`
+- `WEIXIN_CDN_BASE_URL`
 
 ## Weixin Commands
 
@@ -76,6 +80,8 @@ Important behavior:
 - `task 1`, `task 2`, and later tasks are created only by `task 0`.
 - The router does not interpret natural language. It only handles exact `list` and `task N` commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts Codex processes, and forwards messages.
 - Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
+- To send a local image or file back to Weixin, the Codex task should put `MEDIA:/absolute/path/to/file` on its own line. Images are sent as image messages; other supported files are sent as file attachments.
+- Media files must be under `~` or `/tmp` by default and are limited to 20 MB unless `mediaRoots` / `CODEX_WEIXIN_MEDIA_ROOTS` and `maxMediaBytes` / `CODEX_WEIXIN_MAX_MEDIA_BYTES` are configured.
 - `task 0` may create a subtask by emitting this internal JSON object on its own line:
 
 ```json
@@ -91,6 +97,15 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --message "list"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs --list
+```
+
+Dry-run a media send without uploading:
+
+```bash
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --dry-run \
+  --send-media /tmp/screenshot.png \
+  --message "screenshot test"
 ```
 
 ## Test
