@@ -96,6 +96,9 @@ Send these messages to the paired Weixin bot:
 list
 task 0
 task 1
+pwd
+ls
+ls /path/to/project
 add tests for codex-weixin-notifier
 continue by updating the README too
 ```
@@ -107,9 +110,11 @@ list
 task 0
 task 1
 task 2
+pwd
+ls
 ```
 
-`task 0` is the default Codex assistant and always exists. `task 1`, `task 2`, and later tasks are subtasks created by `task 0`. The router only handles exact `list` and `task N` messages; every other Weixin message is forwarded to the current task.
+`task 0` is the default Codex assistant and always exists. `task 1`, `task 2`, and later tasks are subtasks created by `task 0`. The router handles exact `list` and `task N` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
 Replies are prefixed with the task id:
 
@@ -158,7 +163,7 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 tmux attach -t codex-wx-task-...
 ```
 
-`CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_DEFAULT_CWD`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override those fields.
+`task 0` defaults to the WSL home directory. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_DEFAULT_CWD`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override those fields.
 
 ## Completion Hook Shape
 

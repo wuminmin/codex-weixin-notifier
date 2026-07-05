@@ -1,6 +1,6 @@
 {
   "name": "codex-weixin-notifier",
-  "version": "0.1.0+codex.20260705061623",
+  "version": "0.1.0+codex.20260705063241",
   "description": "Send Weixin notifications and route numbered Codex tasks from Weixin.",
   "author": {
     "name": "Local developer"

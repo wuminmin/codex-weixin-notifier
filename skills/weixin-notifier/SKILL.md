@@ -66,13 +66,15 @@ Supported inbound Weixin commands:
 
 - `list`: list numbered tasks.
 - `task 0`, `task 1`, `task 2`: switch the current Codex task for that Weixin sender.
+- `pwd`, `ls`, `ls /path`, `ls -la /path`: run simple WSL directory commands in the current task cwd and return output with line breaks preserved.
 - Any other text: forward to the current task.
 
 Important behavior:
 
 - `task 0` is the default Codex assistant and always exists.
+- `task 0` defaults to the WSL home directory unless `CODEX_WEIXIN_DEFAULT_CWD` is set.
 - `task 1`, `task 2`, and later tasks are created only by `task 0`.
-- The router does not interpret natural language. It only handles exact `list` and `task N` commands, tracks the current task, starts Codex processes, and forwards messages.
+- The router does not interpret natural language. It only handles exact `list` and `task N` commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts Codex processes, and forwards messages.
 - Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
 - `task 0` may create a subtask by emitting this internal JSON object on its own line:
 

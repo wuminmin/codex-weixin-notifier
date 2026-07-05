@@ -190,7 +190,14 @@ function isDryRun(args, config) {
 }
 
 function defaultTaskCwd() {
-  return valueFrom(process.env.CODEX_WEIXIN_DEFAULT_CWD, process.env.PWD, os.homedir());
+  return valueFrom(process.env.CODEX_WEIXIN_DEFAULT_CWD, os.homedir());
+}
+
+function shouldMigrateDefaultTaskCwd(task) {
+  if (String(task?.id) !== DEFAULT_TASK_ID) return false;
+  const cwd = String(task.cwd || "");
+  const current = process.cwd();
+  return cwd === current && /\/plugins\/codex-weixin-notifier$/u.test(current);
 }
 
 function normalizeTasksState(state) {
@@ -211,7 +218,14 @@ function normalizeTasksState(state) {
   } else {
     defaultTask.kind = "default";
     defaultTask.intent = defaultTask.intent || "默认 Codex 助理";
-    defaultTask.cwd = defaultTask.cwd || defaultTaskCwd();
+    if (!defaultTask.cwd || shouldMigrateDefaultTaskCwd(defaultTask)) {
+      defaultTask.cwd = defaultTaskCwd();
+      defaultTask.codexSessionId = "";
+      defaultTask.resumeOf = "";
+      defaultTask.resumeLast = false;
+      defaultTask.logs = {};
+      defaultTask.status = "default";
+    }
     defaultTask.status = defaultTask.status || "default";
     defaultTask.pendingInstructions = Array.isArray(defaultTask.pendingInstructions) ? defaultTask.pendingInstructions : [];
   }
@@ -310,6 +324,12 @@ function compact(text, max = 180) {
   const value = String(text || "").replace(/\s+/g, " ").trim();
   if (value.length <= max) return value;
   return `${value.slice(0, max - 3)}...`;
+}
+
+function compactLines(text, max = 1200) {
+  const value = String(text || "").replace(/\r\n/g, "\n").trim();
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 3).trimEnd()}...`;
 }
 
 function isVerboseTaskReplies(config) {
@@ -463,9 +483,13 @@ function extractSessionId(value) {
     const current = stack.pop();
     if (!current || typeof current !== "object") continue;
     for (const [key, child] of Object.entries(current)) {
-      if ((key === "session_id" || key === "sessionId") && typeof child === "string" && child.trim()) {
-        return child.trim();
-      }
+        if (
+          (key === "session_id" || key === "sessionId" || key === "thread_id" || key === "threadId")
+          && typeof child === "string"
+          && child.trim()
+        ) {
+          return child.trim();
+        }
       if (child && typeof child === "object") stack.push(child);
     }
   }
@@ -775,6 +799,58 @@ function extractSessionIdFromJsonl(filePath) {
   }
 }
 
+function parsedSimpleCommand(text) {
+  const trimmed = String(text || "").trim();
+  if (/^pwd$/iu.test(trimmed)) return { name: "pwd", args: [] };
+  if (!/^ls(?:\s|$)/iu.test(trimmed)) return null;
+
+  const words = splitWords(trimmed);
+  if (words[0] !== "ls") return null;
+  const allowedFlags = new Set(["-a", "-l", "-la", "-al", "-lh", "-hl", "-lah", "-alh", "-hla", "-hal"]);
+  const flags = [];
+  const paths = [];
+  for (const word of words.slice(1)) {
+    if (word.startsWith("-")) {
+      if (!allowedFlags.has(word)) return null;
+      flags.push(word);
+      continue;
+    }
+    paths.push(word);
+  }
+  if (paths.length > 1) return null;
+  return { name: "ls", args: [...flags, ...paths] };
+}
+
+function resolveCommandPath(cwd, target = "") {
+  if (!target) return cwd;
+  const expanded = expandHome(target);
+  return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+}
+
+function runSimpleCommand(task, command) {
+  if (command.name === "pwd") {
+    return [taskHeader(task.id, "pwd"), "", task.cwd].join("\n");
+  }
+
+  const flags = command.args.filter((arg) => arg.startsWith("-"));
+  const targetArg = command.args.find((arg) => !arg.startsWith("-")) || "";
+  const target = resolveCommandPath(task.cwd, targetArg);
+  const result = spawnSync("ls", [...flags, target], {
+    cwd: task.cwd,
+    encoding: "utf8",
+    timeout: 5000,
+    maxBuffer: 64 * 1024,
+  });
+  const output = [result.stdout, result.stderr].filter(Boolean).join("").trimEnd();
+  const label = targetArg ? `ls ${targetArg}` : "ls";
+  const status = result.status === 0 ? label : `${label} 失败`;
+  return [
+    taskHeader(task.id, status),
+    "",
+    compactLines(output || "(无输出)", 2000),
+  ].join("\n");
+}
+
 function formatDefaultTaskPrompt(instruction) {
   return [
     "You are task 0, the default Codex assistant behind a Weixin chat.",
@@ -918,7 +994,7 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
     lines.push(`cwd: ${latest.cwd}`);
     if (latest.tmuxSession) lines.push(`tmux: ${latest.tmuxSession}`);
   }
-  if (last) lines.push("", compact(last, 1000));
+  if (last) lines.push("", compactLines(last, 1200));
   await sendText(lines.join("\n"), config);
   return latest;
 }
@@ -926,6 +1002,9 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
 function forwardToTask(task, text, config, fromUser = "") {
   const instruction = String(text || "").trim();
   if (!instruction) return `task ${task.id}: 空消息已忽略`;
+
+  const simpleCommand = parsedSimpleCommand(instruction);
+  if (simpleCommand) return runSimpleCommand(task, simpleCommand);
 
   const entry = {
     id: createId("inst"),
@@ -947,6 +1026,7 @@ function forwardToTask(task, text, config, fromUser = "") {
     ...current,
     fromUser: fromUser || current.fromUser || "",
     status: "queued",
+    codexSessionId: current.codexSessionId || extractSessionIdFromJsonl(current.logs?.stdout),
     updatedAt: new Date().toISOString(),
   }));
   startCodexRun({
