@@ -29,7 +29,7 @@ const MESSAGE_ITEM_IMAGE = 2;
 const MESSAGE_ITEM_FILE = 4;
 const ILINK_APP_ID = "bot";
 const ILINK_APP_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 6);
-const DEFAULT_RUNNER = "tmux";
+const DEFAULT_RUNNER = "interactive";
 const DEFAULT_TASK_ID = "0";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
@@ -37,21 +37,8 @@ const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MEDIA_TYPE_IMAGE = 1;
 const MEDIA_TYPE_FILE = 3;
 const INBOUND_MEDIA_DIR = "inbox";
-const DEFAULT_APPROVAL_PHRASES = [
-  "同意",
-  "批准",
-  "审批通过",
-  "可以",
-  "执行",
-  "开始",
-  "做吧",
-  "继续",
-  "按计划",
-  "ok",
-  "yes",
-  "go ahead",
-  "approve",
-];
+const DEFAULT_INTERACTIVE_CAPTURE_DELAY_MS = 3000;
+const DEFAULT_INTERACTIVE_CAPTURE_LINES = 120;
 
 const EXTENSION_TO_MIME = {
   ".bmp": "image/bmp",
@@ -1277,6 +1264,7 @@ function buildCodexArgs({ prompt, cwd, outputLastMessage, config, resumeSessionI
 function selectedRunner(config) {
   const requested = valueFrom(process.env.CODEX_WEIXIN_RUNNER, config.runner, DEFAULT_RUNNER);
   const normalized = String(requested).toLowerCase();
+  if (["interactive", "tui", "codex"].includes(normalized) && commandExists("tmux")) return "interactive";
   if (normalized === "spawn" || normalized === "direct") return "spawn";
   if (normalized === "tmux" && commandExists("tmux")) return "tmux";
   return "spawn";
@@ -1354,6 +1342,156 @@ function getTmuxPanePid(sessionName) {
     encoding: "utf8",
   });
   return result.status === 0 ? result.stdout.trim() : "";
+}
+
+function sleepSync(ms) {
+  const delay = Math.max(0, Number(ms || 0));
+  if (delay === 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+}
+
+function hasCliArg(args, name, shortName = "") {
+  return args.some((arg) => arg === name || arg.startsWith(`${name}=`) || (shortName && (arg === shortName || arg.startsWith(`${shortName}=`))));
+}
+
+function interactiveCodexArgs({ cwd, config, imagePaths = [] }) {
+  const { globalArgs } = codexArgGroups(config);
+  const args = [...globalArgs];
+  if (!args.includes("--no-alt-screen")) args.unshift("--no-alt-screen");
+  if (!hasCliArg(args, "--cd", "-C")) args.push("-C", cwd);
+  for (const filePath of imagePaths) args.push("--image", filePath);
+  return args;
+}
+
+function interactiveCaptureDelayMs(config) {
+  return Number(valueFrom(config.interactiveCaptureDelayMs, process.env.CODEX_WEIXIN_INTERACTIVE_CAPTURE_DELAY_MS, DEFAULT_INTERACTIVE_CAPTURE_DELAY_MS));
+}
+
+function interactiveCaptureLines(config) {
+  return Number(valueFrom(config.interactiveCaptureLines, process.env.CODEX_WEIXIN_INTERACTIVE_CAPTURE_LINES, DEFAULT_INTERACTIVE_CAPTURE_LINES));
+}
+
+function captureTmuxPane(sessionName, config) {
+  const lines = Math.max(20, interactiveCaptureLines(config));
+  const result = spawnSync("tmux", ["capture-pane", "-pt", sessionName, "-S", `-${lines}`], {
+    encoding: "utf8",
+    maxBuffer: 256 * 1024,
+  });
+  if (result.status !== 0) {
+    throw new Error(`tmux capture-pane failed: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+  }
+  return result.stdout.trimEnd();
+}
+
+function ensureInteractiveSession(task, config, imagePaths = []) {
+  const sessionName = makeTmuxSessionName(task);
+  if (tmuxHasSession(sessionName)) {
+    const panePid = getTmuxPanePid(sessionName);
+    updateTask(task.id, (current) => ({
+      ...current,
+      status: "running",
+      runner: "interactive",
+      tmuxSession: sessionName,
+      tmuxAttach: `tmux attach -t ${sessionName}`,
+      tmuxPanePid: panePid,
+      pid: panePid || current.pid,
+      updatedAt: new Date().toISOString(),
+    }));
+    return { sessionName, panePid, started: false };
+  }
+
+  const command = valueFrom(config.codexCommand, process.env.CODEX_WEIXIN_CODEX_COMMAND, "codex");
+  const args = interactiveCodexArgs({ cwd: task.cwd, config, imagePaths });
+  const tmuxArgs = [
+    "new-session",
+    "-d",
+    "-s",
+    sessionName,
+    "-c",
+    task.cwd,
+    "env",
+    `CODEX_SESSION_ID=weixin-task-${task.id}`,
+    "CODEX_PRODUCT=codex-weixin-command-router",
+    "CODEX_WEIXIN_ROUTER_TASK=1",
+    command,
+    ...args,
+  ];
+  const tmux = spawnSync("tmux", tmuxArgs, { encoding: "utf8" });
+  if (tmux.status !== 0) {
+    throw new Error(`interactive tmux start failed: ${tmux.stderr || tmux.stdout || `exit ${tmux.status}`}`);
+  }
+  const panePid = getTmuxPanePid(sessionName);
+  updateTask(task.id, (current) => ({
+    ...current,
+    status: "running",
+    runner: "interactive",
+    tmuxSession: sessionName,
+    tmuxAttach: `tmux attach -t ${sessionName}`,
+    tmuxPanePid: panePid,
+    pid: panePid || current.pid,
+    runId: current.runId || createId("interactive"),
+    startedAt: current.startedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }));
+  return { sessionName, panePid, started: true };
+}
+
+function mapInteractiveCommand(text, attachments = []) {
+  const instruction = instructionWithAttachments(text, attachments);
+  const trimmed = instruction.trim();
+  const planMatch = trimmed.match(/^plan(?:\s+(.+))?$/isu);
+  if (planMatch) return `/plan${planMatch[1] ? ` ${planMatch[1].trim()}` : ""}`;
+  const goalMatch = trimmed.match(/^(?:goal|gloal)(?:\s+(.+))?$/isu);
+  if (goalMatch) {
+    const arg = String(goalMatch[1] || "").trim();
+    if (!arg || /^status$/iu.test(arg)) return "/goal";
+    return `/goal ${arg}`;
+  }
+  return trimmed;
+}
+
+function sendTextToTmux(sessionName, text) {
+  const bufferName = `codex-wx-${crypto.randomBytes(4).toString("hex")}`;
+  const load = spawnSync("tmux", ["load-buffer", "-b", bufferName, "-"], {
+    input: text,
+    encoding: "utf8",
+  });
+  if (load.status !== 0) {
+    throw new Error(`tmux load-buffer failed: ${load.stderr || load.stdout || `exit ${load.status}`}`);
+  }
+  const paste = spawnSync("tmux", ["paste-buffer", "-b", bufferName, "-t", sessionName], { encoding: "utf8" });
+  spawnSync("tmux", ["delete-buffer", "-b", bufferName], { encoding: "utf8" });
+  if (paste.status !== 0) {
+    throw new Error(`tmux paste-buffer failed: ${paste.stderr || paste.stdout || `exit ${paste.status}`}`);
+  }
+  const enter = spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"], { encoding: "utf8" });
+  if (enter.status !== 0) {
+    throw new Error(`tmux send-keys failed: ${enter.stderr || enter.stdout || `exit ${enter.status}`}`);
+  }
+}
+
+function sendInteractiveInstruction(task, text, attachments, config) {
+  const imagePaths = imagePathsFromAttachments(attachments);
+  const mapped = mapInteractiveCommand(text, attachments);
+  if (config.dryRun) {
+    return [
+      taskHeader(task.id, "interactive dry-run"),
+      `命令: codex --no-alt-screen --sandbox workspace-write --ask-for-approval never -C ${task.cwd}`,
+      imagePaths.length ? `图片: ${imagePaths.join(" ")}` : null,
+      "",
+      mapped,
+    ].filter(Boolean).join("\n");
+  }
+  const { sessionName, started } = ensureInteractiveSession(task, config, imagePaths);
+  sendTextToTmux(sessionName, mapped);
+  sleepSync(interactiveCaptureDelayMs(config));
+  const output = captureTmuxPane(sessionName, config);
+  return [
+    taskHeader(task.id, started ? "interactive 已启动并发送" : "interactive 已发送"),
+    `会话: ${sessionName}`,
+    "",
+    compactLines(output || "(暂无可抓取输出)", 3000),
+  ].join("\n");
 }
 
 function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, command, args, runId, stdoutPath, stderrPath, lastMessagePath }) {
@@ -1646,40 +1784,12 @@ function instructionWithAttachments(instruction, attachments = []) {
   return [text, summary].filter(Boolean).join("\n\n");
 }
 
-function approvalPhrases(config = {}) {
-  const configured = Array.isArray(config.executionApprovalPhrases)
-    ? config.executionApprovalPhrases
-    : splitList(process.env.CODEX_WEIXIN_EXECUTION_APPROVAL_PHRASES);
-  return configured.length ? configured : DEFAULT_APPROVAL_PHRASES;
-}
-
-function hasExecutionApproval(instruction, config = {}) {
-  const text = String(instruction || "").toLowerCase();
-  return approvalPhrases(config).some((phrase) => {
-    const normalized = String(phrase || "").trim();
-    return normalized && text.includes(normalized.toLowerCase());
-  });
-}
-
-function formatWeixinExecutionPolicy(instruction, config = {}) {
-  const phrases = approvalPhrases(config);
-  const approved = hasExecutionApproval(instruction, config);
-  return [
-    "Global Weixin execution policy:",
-    `- Approval required before execution. Current message approval: ${approved ? "yes" : "no"}.`,
-    `- Approval phrases: ${phrases.join(" / ")}.`,
-    "- If approval is no, do not edit files, run shell commands, start apps, install packages, launch long-running work, or send media. Reply quickly with an intent-understanding confirmation or a short plan, then ask for approval.",
-    "- If approval is yes, execute the requested work normally and keep the response concise.",
-  ].join("\n");
-}
-
-function formatDefaultTaskPrompt(instruction, attachments = [], config = {}) {
+function formatDefaultTaskPrompt(instruction, attachments = []) {
   const userInstruction = instructionWithAttachments(instruction, attachments);
   return [
     "You are task 0, the default Codex assistant behind a Weixin chat.",
     "Answer directly inside task 0. Do not create or request separate subtasks.",
     "Task creation is controlled only by explicit Weixin commands such as task 1.",
-    formatWeixinExecutionPolicy(instruction, config),
     "To send an existing local image or file to Weixin, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
     "Use MEDIA only for files that already exist and are safe to share. Keep the directive on a separate line.",
     "",
@@ -1688,16 +1798,14 @@ function formatDefaultTaskPrompt(instruction, attachments = [], config = {}) {
   ].join("\n");
 }
 
-function formatAppendPrompt(task, instruction, attachments = [], config = {}) {
+function formatAppendPrompt(task, instruction, attachments = []) {
   const userInstruction = instructionWithAttachments(instruction, attachments);
-  const executionPolicy = formatWeixinExecutionPolicy(instruction, config);
-  if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction, attachments, config);
+  if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction, attachments);
   if (!task.codexSessionId && !task.resumeLast) {
     return [
       `You are Weixin-managed task ${task.id}.`,
       task.alias ? `Task alias: ${task.alias}` : null,
       `Working directory: ${task.cwd}`,
-      executionPolicy,
       "",
       "User instruction:",
       userInstruction,
@@ -1708,7 +1816,6 @@ function formatAppendPrompt(task, instruction, attachments = [], config = {}) {
   return [
     `Continue the existing task ${task.id}.`,
     `Original task: ${task.intent}`,
-    executionPolicy,
     "",
     "Additional instruction from Weixin:",
     userInstruction,
@@ -1771,6 +1878,10 @@ function forwardToTask(task, text, config, fromUser = "", attachments = []) {
 
   const simpleCommand = attachments.length === 0 ? parsedSimpleCommand(instruction) : null;
   if (simpleCommand) return runSimpleCommand(task, simpleCommand);
+
+  if (selectedRunner(config) === "interactive") {
+    return sendInteractiveInstruction(task, instruction, attachments, config);
+  }
 
   const entry = {
     id: createId("inst"),
@@ -1952,6 +2063,10 @@ function refreshTaskLiveness(task) {
 
 function startInstructionForTask(task, instructionEntry, config) {
   const entry = normalizeInstructionEntry(instructionEntry);
+  if (selectedRunner(config) === "interactive") {
+    sendInteractiveInstruction(task, entry.text, entry.attachments, config);
+    return;
+  }
   const imagePaths = imagePathsFromAttachments(entry.attachments);
   startCodexRun({
     task,

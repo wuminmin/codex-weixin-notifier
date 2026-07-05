@@ -139,6 +139,17 @@ ls
 
 `task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, and `task tmux clean` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
+By default, each task is a long-running interactive Codex session in a fixed tmux session. The router starts task `N` with this shape:
+
+```bash
+codex --no-alt-screen \
+  --sandbox workspace-write \
+  --ask-for-approval never \
+  -C ~/codex/taskN
+```
+
+The router sends ordinary Weixin text into the task tmux session and captures recent terminal output back to Weixin. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
+
 Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create `~/codex/task3`, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
 
 `task close` accepts one or more task ids or aliases:
@@ -163,17 +174,9 @@ codex-wx-task-1
 codex-wx-task-2
 ```
 
-Finished task runs close their tmux session by default. Set `CODEX_WEIXIN_KEEP_TMUX_OPEN=1` or `keepTmuxOpen: true` only when you need a debug shell left open. `task tmux clean` removes old pre-fixed-session names such as `codex-wx-task-1-wxrun-...` and `codex-wx-task-1-wxr-...`.
+Interactive task tmux sessions stay open until `task close N` or the Codex CLI exits. `task tmux clean` removes old pre-fixed-session names such as `codex-wx-task-1-wxrun-...` and `codex-wx-task-1-wxr-...`.
 
 When the router starts or receives a new ordinary task message, it refreshes the recorded task runner state. If a task is marked `running` or `queued` but the recorded tmux session or pid no longer exists, the router clears the stale runner fields. If that task has pending instructions, the router automatically resumes the queue instead of leaving new messages stuck behind a dead run.
-
-Ordinary Weixin messages use a global approval-first rule before execution. Unless the current message contains an approval phrase or a clear approval intent, the child Codex task should quickly return an intent confirmation or short plan instead of editing files, running shell commands, starting apps, installing packages, launching long-running work, or sending media. Default approval phrases:
-
-```text
-同意, 批准, 审批通过, 可以, 执行, 开始, 做吧, 继续, 按计划, ok, yes, go ahead, approve
-```
-
-Override them with `CODEX_WEIXIN_EXECUTION_APPROVAL_PHRASES` as a comma-separated list, or `executionApprovalPhrases` in `~/.codex/weixin-notifier.json`.
 
 Replies are prefixed with the task id:
 
@@ -234,9 +237,9 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 }
 ```
 
-By default, Weixin tasks run child Codex with `--sandbox workspace-write`, which can write the fixed task directory `~/codex/taskN` and temporary files while still avoiding full WSL access. To intentionally run child Codex without sandboxing, set `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` or `"codexBypassSandbox": true`; this is dangerous because a Weixin message can then trigger writes anywhere the WSL user can access.
+By default, Weixin tasks run interactive Codex with `--sandbox workspace-write` and `--ask-for-approval never`, which can write the fixed task directory `~/codex/taskN` and temporary files while still avoiding full WSL access. To intentionally run child Codex without sandboxing, set `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` or `"codexBypassSandbox": true`; this is dangerous because a Weixin message can then trigger writes anywhere the WSL user can access.
 
-`runner` defaults to `tmux` when tmux is installed, and falls back to direct `spawn` otherwise. tmux tasks keep an attachable session open after Codex exits so you can inspect the terminal:
+`runner` defaults to `interactive` when tmux is installed. Set `CODEX_WEIXIN_RUNNER=tmux` for the older `codex exec` inside tmux behavior, or `CODEX_WEIXIN_RUNNER=spawn` for direct `codex exec`. Interactive tasks keep an attachable session open:
 
 ```bash
 tmux attach -t codex-wx-task-...

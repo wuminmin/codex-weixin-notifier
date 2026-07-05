@@ -13,9 +13,10 @@ The plugin separates the completion event from the Weixin transport:
 
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
 - `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks.
-- `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N`, and forwards ordinary text to the selected task.
-- `scripts/weixin-command-router.mjs` accepts inbound Weixin images and files for the current task; images are saved under `~/codex/taskN/inbox/` and passed to Codex with `--image`, while other files are saved there and referenced by local path in the prompt.
-- `scripts/weixin-command-router.mjs` injects a global approval-first execution rule into every Weixin-forwarded Codex prompt: without an explicit approval phrase, the child Codex should quickly return intent confirmation or a plan instead of executing changes or commands.
+- `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N`, and forwards ordinary text to the selected task's interactive tmux Codex session.
+- `scripts/weixin-command-router.mjs` starts interactive tasks with `codex --no-alt-screen --sandbox workspace-write --ask-for-approval never -C ~/codex/taskN` by default, so Weixin can drive native CLI slash commands such as `/plan` and `/goal`.
+- `scripts/weixin-command-router.mjs` maps Weixin `plan ...` to `/plan ...`, and `goal ...` / `goal status` / `goal pause` / `goal resume` / `goal clear` to the native `/goal` command family.
+- `scripts/weixin-command-router.mjs` accepts inbound Weixin images and files for the current task; images are saved under `~/codex/taskN/inbox/` and passed to Codex with `--image` when the interactive session starts, while other files are saved there and referenced by local path in the prompt.
 - `scripts/weixin-command-router.mjs` also sends local images and file attachments when a Codex task emits a `MEDIA:/absolute/path` directive on its own line.
 - Each notification carries a `sessionId`, `source`, `workspace`, `task`, `status`, and completion time.
 - Multiple Codex processes are separated by an explicit session id when available; otherwise the sender derives a short id from process and workspace context.
@@ -98,11 +99,10 @@ Important behavior:
 - Task ids are monotonic and must be created one at a time; ids are not deleted or reused.
 - `task 0` does not create other tasks. New tasks are created only by explicit `task N` commands.
 - `task reset ...` refuses running, starting, or queued tasks; close them first with `task close ...`.
-- tmux runner sessions are fixed by task id, such as `codex-wx-task-0` and `codex-wx-task-1`; completed runs close by default unless `CODEX_WEIXIN_KEEP_TMUX_OPEN=1` or `keepTmuxOpen: true` is set.
+- interactive tmux sessions are fixed by task id, such as `codex-wx-task-0` and `codex-wx-task-1`; they stay open until `task close N` or the Codex CLI exits.
 - `task tmux clean` only removes legacy per-run sessions named like `codex-wx-task-1-wxrun-...` or `codex-wx-task-1-wxr-...`; it does not remove `codex-wx-router` or fixed task sessions.
 - Router startup and ordinary message forwarding refresh stale task runner state. If a task is marked active but its tmux session or pid is gone, the stale runner fields are cleared and pending instructions are resumed instead of leaving future messages stuck in queue.
-- Child Codex runs default to `--sandbox workspace-write`; use `CODEX_WEIXIN_CODEX_SANDBOX` / `codexSandbox` to change the sandbox mode, or `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true` only when intentionally allowing unsandboxed WSL access.
-- Weixin-forwarded Codex prompts require approval intent before execution. Default approval phrases include `同意`, `批准`, `可以`, `执行`, `开始`, `做吧`, `继续`, `ok`, `yes`, `go ahead`, and `approve`; customize with `CODEX_WEIXIN_EXECUTION_APPROVAL_PHRASES` or `executionApprovalPhrases`.
+- Child Codex runs default to `--sandbox workspace-write --ask-for-approval never`; use `CODEX_WEIXIN_CODEX_SANDBOX` / `codexSandbox` to change the sandbox mode, or `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true` only when intentionally allowing unsandboxed WSL access.
 - The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.
 - Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
 - Weixin image/file messages go to the current task. Images use Codex `--image`; ordinary files are referenced by saved local path because Codex CLI does not provide a generic `--file` option.
