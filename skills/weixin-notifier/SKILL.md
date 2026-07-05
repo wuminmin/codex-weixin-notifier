@@ -14,6 +14,7 @@ The plugin separates the completion event from the Weixin transport:
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
 - `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks.
 - `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N`, and forwards ordinary text to the selected task.
+- `scripts/weixin-command-router.mjs` accepts inbound Weixin images and files for the current task; images are saved under `~/codex/taskN/inbox/` and passed to Codex with `--image`, while other files are saved there and referenced by local path in the prompt.
 - `scripts/weixin-command-router.mjs` also sends local images and file attachments when a Codex task emits a `MEDIA:/absolute/path` directive on its own line.
 - Each notification carries a `sessionId`, `source`, `workspace`, `task`, `status`, and completion time.
 - Multiple Codex processes are separated by an explicit session id when available; otherwise the sender derives a short id from process and workspace context.
@@ -78,6 +79,7 @@ Supported inbound Weixin commands:
 - `task tmux clean`: remove old per-run tmux sessions from before fixed task session names.
 - `pwd`, `ls`, `ls /path`, `ls -la /path`: run simple WSL directory commands in the current task cwd and return output with line breaks preserved.
 - Any other text: forward to the current task.
+- Any inbound image/file message: save the attachment under the current task's `inbox` directory and forward it to the current task. Images are also attached to Codex with `--image`.
 
 Important behavior:
 
@@ -92,6 +94,7 @@ Important behavior:
 - Child Codex runs default to `--sandbox workspace-write`; use `CODEX_WEIXIN_CODEX_SANDBOX` / `codexSandbox` to change the sandbox mode, or `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true` only when intentionally allowing unsandboxed WSL access.
 - The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.
 - Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
+- Weixin image/file messages go to the current task. Images use Codex `--image`; ordinary files are referenced by saved local path because Codex CLI does not provide a generic `--file` option.
 - To send a local image or file back to Weixin, the Codex task should put `MEDIA:/absolute/path/to/file` on its own line. Images are sent as image messages; other supported files are sent as file attachments.
 - Media files must be under `~` or `/tmp` by default and are limited to 20 MB unless `mediaRoots` / `CODEX_WEIXIN_MEDIA_ROOTS` and `maxMediaBytes` / `CODEX_WEIXIN_MAX_MEDIA_BYTES` are configured.
 Local command-router smoke checks:

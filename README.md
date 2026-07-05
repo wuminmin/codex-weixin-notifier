@@ -222,6 +222,25 @@ tmux attach -t codex-wx-task-...
 
 All task working directories are fixed under `~/codex/taskN`. `CODEX_WEIXIN_TASK_ROOT` can override the root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
 
+## Weixin Attachments
+
+The command router accepts inbound Weixin image and file messages for the current task:
+
+- Inbound images are downloaded into `~/codex/taskN/inbox/` and passed to Codex with `codex exec --image /path/to/image`.
+- Inbound files are downloaded into `~/codex/taskN/inbox/` and their local paths are included in the Codex prompt so the task can read them directly.
+- If a task is already running, the text plus attachment paths are queued together and started after the current run finishes.
+- Attachments use the same 20 MB default size limit as media replies; override it with `CODEX_WEIXIN_MAX_MEDIA_BYTES` or `maxMediaBytes`.
+
+Local dry-run for the attachment path:
+
+```bash
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --once \
+  --dry-run \
+  --attach-file /tmp/screenshot.png \
+  --message "analyze this image"
+```
+
 ## Media Replies
 
 The command router can send local images and file attachments back to Weixin when a Codex task includes a media directive on its own line:

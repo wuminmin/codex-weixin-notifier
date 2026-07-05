@@ -36,6 +36,7 @@ const DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MEDIA_TYPE_IMAGE = 1;
 const MEDIA_TYPE_FILE = 3;
+const INBOUND_MEDIA_DIR = "inbox";
 
 const EXTENSION_TO_MIME = {
   ".bmp": "image/bmp",
@@ -62,6 +63,7 @@ const EXTENSION_TO_MIME = {
 };
 
 const IMAGE_MIME_PREFIX = "image/";
+const MIME_TO_EXTENSION = Object.fromEntries(Object.entries(EXTENSION_TO_MIME).map(([ext, mime]) => [mime, ext]));
 
 const runtimeChildren = new Map();
 
@@ -591,6 +593,165 @@ function isImageFile(filePath) {
   return getMimeFromFilename(filePath).startsWith(IMAGE_MIME_PREFIX);
 }
 
+function isImageAttachment(attachment) {
+  return attachment?.kind === "image" || String(attachment?.mime || "").startsWith(IMAGE_MIME_PREFIX) || isImageFile(attachment?.filePath || "");
+}
+
+function imagePathsFromAttachments(attachments = []) {
+  return attachments.filter(isImageAttachment).map((attachment) => attachment.filePath).filter(Boolean);
+}
+
+function findFirstStringByKeys(value, keys) {
+  if (!value || typeof value !== "object") return "";
+  const wanted = new Set(keys.map((key) => key.toLowerCase()));
+  const stack = [value];
+  const seen = new Set();
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    for (const [key, child] of Object.entries(current)) {
+      if (wanted.has(key.toLowerCase()) && typeof child === "string" && child.trim()) {
+        return child.trim();
+      }
+      if (child && typeof child === "object") stack.push(child);
+    }
+  }
+  return "";
+}
+
+function mediaPayloadFromItem(item, kind) {
+  if (kind === "image") return item?.image_item || item?.imageItem || item?.image || item;
+  return item?.file_item || item?.fileItem || item?.file || item;
+}
+
+function extractInboundMedia(message) {
+  const attachments = [];
+  for (const item of messageItems(message)) {
+    const kind = item?.type === MESSAGE_ITEM_IMAGE || item?.image_item || item?.imageItem ? "image"
+      : item?.type === MESSAGE_ITEM_FILE || item?.file_item || item?.fileItem ? "file"
+        : "";
+    if (!kind) continue;
+    const payload = mediaPayloadFromItem(item, kind);
+    const fileName = findFirstStringByKeys(payload, ["file_name", "filename", "fileName", "name", "title"]);
+    const mime = findFirstStringByKeys(payload, ["mime", "mime_type", "mimeType", "content_type", "contentType"]);
+    attachments.push({
+      kind,
+      fileName,
+      mime,
+      url: findFirstStringByKeys(payload, ["download_url", "downloadUrl", "file_url", "fileUrl", "cdn_url", "cdnUrl", "media_url", "mediaUrl", "url"]),
+      encryptedParam: findFirstStringByKeys(payload, ["encrypt_query_param", "encrypted_query_param", "encryptedQueryParam", "download_encrypt_query_param"]),
+      aesKey: findFirstStringByKeys(payload, ["aes_key", "aesKey", "aeskey"]),
+      item,
+    });
+  }
+  return attachments;
+}
+
+function decodeMediaAesKey(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  if (/^[0-9a-f]{32}$/iu.test(text)) return Buffer.from(text, "hex");
+  const decoded = Buffer.from(text, "base64");
+  const decodedText = decoded.toString("utf8").trim();
+  if (/^[0-9a-f]{32}$/iu.test(decodedText)) return Buffer.from(decodedText, "hex");
+  if (decoded.length === 16) return decoded;
+  throw new Error("微信附件 AES key 格式无法识别");
+}
+
+function decryptAesEcb(ciphertext, aesKey) {
+  const key = decodeMediaAesKey(aesKey);
+  if (!key) return ciphertext;
+  const decipher = crypto.createDecipheriv("aes-128-ecb", key, null);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
+function buildCdnDownloadUrl({ cdnBaseUrl, encryptedParam }) {
+  return `${cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(encryptedParam)}`;
+}
+
+function inboundFileExtension({ fileName, mime, kind }) {
+  const ext = path.extname(String(fileName || "")).toLowerCase();
+  if (ext) return ext;
+  if (mime && MIME_TO_EXTENSION[mime]) return MIME_TO_EXTENSION[mime];
+  return kind === "image" ? ".png" : ".bin";
+}
+
+function sanitizeFileStem(value, fallback) {
+  const stem = path.basename(String(value || fallback), path.extname(String(value || "")))
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+  return stem || fallback;
+}
+
+function inboundFilePath(task, attachment) {
+  const dir = path.join(task.cwd, INBOUND_MEDIA_DIR);
+  fs.mkdirSync(dir, { recursive: true });
+  const ext = inboundFileExtension(attachment);
+  const stem = sanitizeFileStem(attachment.fileName, attachment.kind === "image" ? "weixin-image" : "weixin-file");
+  return path.join(dir, `${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-${crypto.randomBytes(3).toString("hex")}-${stem}${ext}`);
+}
+
+async function fetchBinary(url, config) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(valueFrom(config.timeoutMs, 15000)));
+  try {
+    const headers = {};
+    const configuredBaseUrl = valueFrom(config.baseUrl, DEFAULT_ILINK_BASE_URL);
+    if (url.startsWith(configuredBaseUrl) && valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN)) {
+      Object.assign(headers, buildHeaders(valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN)));
+    }
+    const response = await fetch(url, { headers, signal: controller.signal });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`HTTP ${response.status}: ${body}`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function downloadInboundMedia(attachment, config) {
+  const cdnBaseUrl = valueFrom(config.cdnBaseUrl, process.env.WEIXIN_CDN_BASE_URL, DEFAULT_CDN_BASE_URL);
+  const downloadUrl = attachment.url || (attachment.encryptedParam
+    ? buildCdnDownloadUrl({ cdnBaseUrl, encryptedParam: attachment.encryptedParam })
+    : "");
+  if (!downloadUrl) throw new Error("微信附件没有可用的下载地址");
+  const downloaded = await fetchBinary(downloadUrl, config);
+  return attachment.aesKey ? decryptAesEcb(downloaded, attachment.aesKey) : downloaded;
+}
+
+async function saveInboundMediaForTask(task, attachments, config) {
+  const saved = [];
+  const maxBytes = Number(valueFrom(config.maxMediaBytes, process.env.CODEX_WEIXIN_MAX_MEDIA_BYTES, MAX_MEDIA_BYTES));
+  for (const attachment of attachments) {
+    const buffer = attachment.filePath ? fs.readFileSync(attachment.filePath) : await downloadInboundMedia(attachment, config);
+    if (buffer.length > maxBytes) throw new Error(`微信附件过大：${buffer.length} bytes > ${maxBytes} bytes`);
+    const filePath = attachment.filePath ? path.resolve(attachment.filePath) : inboundFilePath(task, attachment);
+    if (!attachment.filePath) fs.writeFileSync(filePath, buffer);
+    const savedAttachment = {
+      kind: attachment.kind,
+      filePath,
+      fileName: path.basename(filePath),
+      mime: attachment.mime || getMimeFromFilename(filePath),
+      size: buffer.length,
+      savedAt: new Date().toISOString(),
+    };
+    saved.push(savedAttachment);
+    if (!attachment.filePath) {
+      writeJsonFile(`${filePath}.json`, {
+        ...savedAttachment,
+        originalFileName: attachment.fileName || "",
+        source: attachment.url ? "url" : "cdn",
+        encrypted: Boolean(attachment.aesKey),
+      });
+    }
+  }
+  return saved;
+}
+
 function mediaRoots(config) {
   const configured = Array.isArray(config.mediaRoots)
     ? config.mediaRoots
@@ -645,11 +806,17 @@ function taskStatusText(status) {
 
 function extractText(message) {
   if (typeof message === "string") return message.trim();
-  for (const item of message?.item_list || []) {
-    const text = item?.text_item?.text;
+  for (const item of messageItems(message)) {
+    const text = item?.text_item?.text || item?.textItem?.text;
     if (typeof text === "string" && text.trim()) return text.trim();
   }
   return "";
+}
+
+function messageItems(message) {
+  return Array.isArray(message?.item_list) ? message.item_list
+    : Array.isArray(message?.itemList) ? message.itemList
+      : [];
 }
 
 function isInboundUserMessage(message) {
@@ -1053,8 +1220,13 @@ function codexArgGroups(config) {
   return { globalArgs, execArgs };
 }
 
-function buildCodexArgs({ prompt, cwd, outputLastMessage, config, resumeSessionId, resumeLast = false }) {
+function codexImageArgs(imagePaths = []) {
+  return imagePaths.flatMap((filePath) => ["--image", filePath]);
+}
+
+function buildCodexArgs({ prompt, cwd, outputLastMessage, config, resumeSessionId, resumeLast = false, imagePaths = [] }) {
   const { globalArgs, execArgs } = codexArgGroups(config);
+  const imageArgs = codexImageArgs(imagePaths);
 
   if (resumeSessionId || resumeLast) {
     return [
@@ -1062,6 +1234,7 @@ function buildCodexArgs({ prompt, cwd, outputLastMessage, config, resumeSessionI
       "exec",
       "resume",
       ...execArgs,
+      ...imageArgs,
       "-o",
       outputLastMessage,
       ...(resumeSessionId ? [resumeSessionId] : ["--last"]),
@@ -1073,6 +1246,7 @@ function buildCodexArgs({ prompt, cwd, outputLastMessage, config, resumeSessionI
     ...globalArgs,
     "exec",
     ...execArgs,
+    ...imageArgs,
     "-C",
     cwd,
     "-o",
@@ -1233,7 +1407,7 @@ function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, 
   return { pid: panePid, tmuxSession: sessionName, stdoutPath, stderrPath, lastMessagePath };
 }
 
-function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast = false }) {
+function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast = false, imagePaths = [] }) {
   const command = valueFrom(config.codexCommand, process.env.CODEX_WEIXIN_CODEX_COMMAND, "codex");
   const runId = createId(resumeSessionId ? "wxr" : "wxrun");
   const logBase = expandHome(path.join(LOG_DIR, String(task.id), runId));
@@ -1248,6 +1422,7 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
     config,
     resumeSessionId,
     resumeLast,
+    imagePaths,
   });
 
   if (selectedRunner(config) === "tmux") {
@@ -1422,7 +1597,38 @@ function runSimpleCommand(task, command) {
   ].join("\n");
 }
 
-function formatDefaultTaskPrompt(instruction) {
+function normalizeInstructionEntry(value) {
+  if (value && typeof value === "object") {
+    return {
+      text: String(value.text || "").trim(),
+      attachments: Array.isArray(value.attachments) ? value.attachments : [],
+    };
+  }
+  return { text: String(value || "").trim(), attachments: [] };
+}
+
+function formatAttachmentSummary(attachments = []) {
+  if (!attachments.length) return "";
+  return [
+    "微信附件已保存到本地：",
+    ...attachments.map((attachment, index) => {
+      const label = isImageAttachment(attachment) ? "image" : "file";
+      const size = attachment.size ? ` ${attachment.size} bytes` : "";
+      return `${index + 1}. ${label}: ${attachment.filePath}${size}`;
+    }),
+    "",
+    "图片附件已通过 Codex --image 附加；文件附件请直接读取上面的本地路径。",
+  ].join("\n");
+}
+
+function instructionWithAttachments(instruction, attachments = []) {
+  const text = String(instruction || "").trim() || (attachments.length ? "请处理微信发来的附件。" : "");
+  const summary = formatAttachmentSummary(attachments);
+  return [text, summary].filter(Boolean).join("\n\n");
+}
+
+function formatDefaultTaskPrompt(instruction, attachments = []) {
+  const userInstruction = instructionWithAttachments(instruction, attachments);
   return [
     "You are task 0, the default Codex assistant behind a Weixin chat.",
     "Answer directly inside task 0. Do not create or request separate subtasks.",
@@ -1431,12 +1637,13 @@ function formatDefaultTaskPrompt(instruction) {
     "Use MEDIA only for files that already exist and are safe to share. Keep the directive on a separate line.",
     "",
     "Weixin user message:",
-    instruction,
+    userInstruction,
   ].join("\n");
 }
 
-function formatAppendPrompt(task, instruction) {
-  if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction);
+function formatAppendPrompt(task, instruction, attachments = []) {
+  const userInstruction = instructionWithAttachments(instruction, attachments);
+  if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction, attachments);
   if (!task.codexSessionId && !task.resumeLast) {
     return [
       `You are Weixin-managed task ${task.id}.`,
@@ -1444,7 +1651,7 @@ function formatAppendPrompt(task, instruction) {
       `Working directory: ${task.cwd}`,
       "",
       "User instruction:",
-      instruction,
+      userInstruction,
       "",
       "If your answer needs to send an existing local image or file, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
     ].filter(Boolean).join("\n");
@@ -1454,7 +1661,7 @@ function formatAppendPrompt(task, instruction) {
     `Original task: ${task.intent}`,
     "",
     "Additional instruction from Weixin:",
-    instruction,
+    userInstruction,
     "",
     "If your answer needs to send an existing local image or file, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
   ].join("\n");
@@ -1481,7 +1688,8 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   if (!latest) return null;
   const queued = Array.isArray(latest.pendingInstructions) ? [...latest.pendingInstructions] : [];
   if (queued.length > 0) {
-    const nextInstruction = queued.shift();
+    const nextInstruction = normalizeInstructionEntry(queued.shift());
+    const imagePaths = imagePathsFromAttachments(nextInstruction.attachments);
     const updated = updateTask(latest.id, (current) => ({
       ...current,
       pendingInstructions: queued,
@@ -1491,10 +1699,11 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
     if (updated) {
       startCodexRun({
         task: updated,
-        prompt: formatAppendPrompt(updated, nextInstruction),
+        prompt: formatAppendPrompt(updated, nextInstruction.text, nextInstruction.attachments),
         config,
         resumeSessionId: updated.codexSessionId || "",
         resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
+        imagePaths,
       });
     }
     return updated;
@@ -1513,24 +1722,26 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   return latest;
 }
 
-function forwardToTask(task, text, config, fromUser = "") {
+function forwardToTask(task, text, config, fromUser = "", attachments = []) {
   const instruction = String(text || "").trim();
-  if (!instruction) return `task ${task.id}: 空消息已忽略`;
+  if (!instruction && attachments.length === 0) return `task ${task.id}: 空消息已忽略`;
 
-  const simpleCommand = parsedSimpleCommand(instruction);
+  const simpleCommand = attachments.length === 0 ? parsedSimpleCommand(instruction) : null;
   if (simpleCommand) return runSimpleCommand(task, simpleCommand);
 
   const entry = {
     id: createId("inst"),
     text: instruction,
+    attachments,
     addedAt: new Date().toISOString(),
   };
+  const imagePaths = imagePathsFromAttachments(entry.attachments);
 
   if (["running", "starting", "queued"].includes(task.status)) {
     const updated = updateTask(task.id, (current) => ({
       ...current,
       fromUser: fromUser || current.fromUser || "",
-      pendingInstructions: [...(current.pendingInstructions || []), entry.text],
+      pendingInstructions: [...(current.pendingInstructions || []), entry],
       updatedAt: new Date().toISOString(),
     }));
     return `${taskHeader(updated.id, "已排队")} (${updated.pendingInstructions.length})`;
@@ -1548,10 +1759,11 @@ function forwardToTask(task, text, config, fromUser = "") {
   });
   startCodexRun({
     task: updated,
-    prompt: formatAppendPrompt(updated, entry.text),
+    prompt: formatAppendPrompt(updated, entry.text, entry.attachments),
     config,
     resumeSessionId: updated.codexSessionId || "",
     resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
+    imagePaths,
   });
   return taskHeader(updated.id, "处理中");
 }
@@ -1718,10 +1930,32 @@ async function handleText(text, fromUser, config) {
   return forwardToTask(task, command.text, config, fromUser);
 }
 
+async function handleTextWithAttachments(text, fromUser, config, attachments = []) {
+  if (attachments.length === 0) return handleText(text, fromUser, config);
+  const task = getCurrentTask(fromUser);
+  if (!task) return "task 0: 状态异常，未找到默认任务。";
+  const savedAttachments = await saveInboundMediaForTask(task, attachments, config);
+  return forwardToTask(task, text, config, fromUser, savedAttachments);
+}
+
+function localAttachmentFromPath(filePath) {
+  const resolved = path.resolve(expandHome(filePath));
+  const stat = fs.statSync(resolved);
+  const mime = getMimeFromFilename(resolved);
+  return {
+    kind: mime.startsWith(IMAGE_MIME_PREFIX) ? "image" : "file",
+    filePath: resolved,
+    fileName: path.basename(resolved),
+    mime,
+    size: stat.size,
+  };
+}
+
 async function runOnce(args, config) {
   const text = valueFrom(args.message, args._.join(" "));
-  if (!text) throw new Error("Missing --message for --once.");
-  const response = await handleText(text, "local", config);
+  const attachments = args["attach-file"] ? [localAttachmentFromPath(args["attach-file"])] : [];
+  if (!text && attachments.length === 0) throw new Error("Missing --message for --once.");
+  const response = await handleTextWithAttachments(text || "", "local", config, attachments);
   process.stdout.write(`${response}\n`);
 }
 
@@ -1737,10 +1971,11 @@ async function runPoll(args, config) {
       try {
         if (!isInboundUserMessage(message)) continue;
         const text = extractText(message);
-        if (!text) continue;
+        const attachments = extractInboundMedia(message);
+        if (!text && attachments.length === 0) continue;
         rememberRecipientContext(config, message, sync);
         const replyTarget = getReplyTarget(message, config);
-        const response = await handleText(text, replyTarget, config);
+        const response = await handleTextWithAttachments(text, replyTarget, config, attachments);
         await sendTextWithMedia(response, {
           ...config,
           toUser: replyTarget || config.toUser,
