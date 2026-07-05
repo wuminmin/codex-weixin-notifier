@@ -7,6 +7,10 @@ import process from "node:process";
 const NOTIFY = "/path/to/codex-weixin-notifier/scripts/notify-weixin.mjs";
 const LOG = "/tmp/codex-weixin-notifier-hook.log";
 
+if (process.env.CODEX_WEIXIN_ROUTER_TASK === "1") {
+  process.exit(0);
+}
+
 async function readStdinJson() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);

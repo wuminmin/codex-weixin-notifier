@@ -312,6 +312,23 @@ function compact(text, max = 180) {
   return `${value.slice(0, max - 3)}...`;
 }
 
+function isVerboseTaskReplies(config) {
+  return config.verboseTaskReplies === true || process.env.CODEX_WEIXIN_VERBOSE_TASK_REPLIES === "1";
+}
+
+function taskHeader(taskId, text) {
+  return `task ${taskId} · ${text}`;
+}
+
+function taskStatusText(status) {
+  if (status === "completed") return "完成";
+  if (status === "failed") return "失败";
+  if (status === "running") return "运行中";
+  if (status === "queued") return "排队中";
+  if (status === "starting") return "启动中";
+  return status || "未知";
+}
+
 function extractText(message) {
   if (typeof message === "string") return message.trim();
   for (const item of message?.item_list || []) {
@@ -559,6 +576,7 @@ function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, 
   const envPrefix = [
     ["CODEX_SESSION_ID", `weixin-task-${task.id}`],
     ["CODEX_PRODUCT", "codex-weixin-command-router"],
+    ["CODEX_WEIXIN_ROUTER_TASK", "1"],
   ].map(([key, value]) => `${key}=${shQuote(value)}`).join(" ");
   const codexLine = [envPrefix, shQuote(command), ...args.map(shQuote)].filter(Boolean).join(" ");
   const completionLine = [
@@ -658,6 +676,7 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
       ...process.env,
       CODEX_SESSION_ID: `weixin-task-${task.id}`,
       CODEX_PRODUCT: "codex-weixin-command-router",
+      CODEX_WEIXIN_ROUTER_TASK: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -827,12 +846,14 @@ function createNumberedTask({ prompt, cwd, fromUser = "", kind = "subtask", pare
   return {
     ok: true,
     task: { ...task, pid: run.pid },
-    message: [
-      `task ${parentTaskId}: 已创建 task ${task.id}`,
-      `task ${task.id}: [starting] cwd=${task.cwd}`,
-      run.tmuxSession ? `tmux=${run.tmuxSession}` : null,
-      run.pid ? `pid=${run.pid}` : null,
-    ].filter(Boolean).join("\n"),
+    message: isVerboseTaskReplies(config)
+      ? [
+        taskHeader(parentTaskId, `已创建 task ${task.id}`),
+        `cwd: ${task.cwd}`,
+        run.tmuxSession ? `tmux: ${run.tmuxSession}` : null,
+        run.pid ? `pid: ${run.pid}` : null,
+      ].filter(Boolean).join("\n")
+      : [taskHeader(parentTaskId, `已创建 task ${task.id}`), `cwd: ${task.cwd}`].join("\n"),
   };
 }
 
@@ -890,18 +911,15 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
     return latest;
   }
 
-  await sendText(
-    [
-      `task ${latest.id}: ${latest.status}`,
-      `exit=${numericExit === null ? signal || "unknown" : numericExit}`,
-      `cwd=${latest.cwd}`,
-      latest.tmuxSession ? `tmux=${latest.tmuxSession}` : null,
-      latest.tmuxAttach ? `attach=${latest.tmuxAttach}` : null,
-      last ? "" : null,
-      last ? compact(last, 1200) : null,
-    ].filter(Boolean).join("\n"),
-    config,
-  );
+  const statusText = taskStatusText(latest.status);
+  const lines = [taskHeader(latest.id, statusText)];
+  if (latest.status !== "completed") lines.push(`exit: ${numericExit === null ? signal || "unknown" : numericExit}`);
+  if (isVerboseTaskReplies(config)) {
+    lines.push(`cwd: ${latest.cwd}`);
+    if (latest.tmuxSession) lines.push(`tmux: ${latest.tmuxSession}`);
+  }
+  if (last) lines.push("", compact(last, 1000));
+  await sendText(lines.join("\n"), config);
   return latest;
 }
 
@@ -922,11 +940,7 @@ function forwardToTask(task, text, config, fromUser = "") {
       pendingInstructions: [...(current.pendingInstructions || []), entry.text],
       updatedAt: new Date().toISOString(),
     }));
-    return [
-      `task ${updated.id}: 已排队`,
-      `status=${updated.status}`,
-      `queued=${updated.pendingInstructions.length}`,
-    ].join("\n");
+    return `${taskHeader(updated.id, "已排队")} (${updated.pendingInstructions.length})`;
   }
 
   const updated = updateTask(task.id, (current) => ({
@@ -942,7 +956,7 @@ function forwardToTask(task, text, config, fromUser = "") {
     resumeSessionId: updated.codexSessionId || "",
     resumeLast: !updated.codexSessionId && Boolean(updated.resumeLast),
   });
-  return [`task ${updated.id}: 已开始`, `cwd=${updated.cwd}`].join("\n");
+  return taskHeader(updated.id, "处理中");
 }
 
 function pruneDeadTasks() {
