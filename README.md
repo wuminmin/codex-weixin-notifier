@@ -5,7 +5,7 @@ Local Codex plugin that pairs Weixin by QR code, sends Weixin notifications when
 ## Architecture
 
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
-- `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint.
+- `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint. When Markdown image rendering is enabled, completion notifications are sent as terminal-style PNG images.
 - `scripts/weixin-command-router.mjs` long-polls inbound Weixin messages, keeps a numbered task list, switches the current task with `task N`, and forwards ordinary text to the selected Codex task.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
@@ -62,6 +62,12 @@ node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
   --source codex-cli \
   --task "Smoke test" \
   --summary "This is a formatting-only test."
+```
+
+When Markdown image rendering is enabled, the dry run prints the generated image path instead of uploading:
+
+```text
+[dry-run media] image /tmp/codex-weixin-md-.../reply.png ...
 ```
 
 Real send after pairing:
@@ -150,7 +156,7 @@ codex --no-alt-screen \
   -C ~/codex/taskN
 ```
 
-The router sends ordinary Weixin text into the task tmux session and captures recent terminal output back to Weixin. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
+When the router receives an ordinary task message, it first sends a small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and captures recent terminal output back to Weixin. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
 
 When Codex enters an interactive `Question 1/1` choice prompt, the router formats the question and numbered options for Weixin. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
 
@@ -258,7 +264,7 @@ tmux attach -t codex-wx-task-...
 
 All task working directories are fixed under `~/codex/taskN`. `CODEX_WEIXIN_TASK_ROOT` can override the root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
 
-Set `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` to render normal text/Markdown replies as terminal-style PNG images before sending them to Weixin. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. If rendering or image upload fails, the router falls back to the original text reply.
+Set `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` to render normal text/Markdown replies and completion notifications as terminal-style PNG images before sending them to Weixin. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. If rendering or image upload fails, the sender falls back to the original text reply.
 
 ## Weixin Attachments
 

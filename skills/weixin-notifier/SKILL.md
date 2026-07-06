@@ -12,8 +12,9 @@ Use this skill when the user wants Codex to pair Weixin by QR code, notify Weixi
 The plugin separates the completion event from the Weixin transport:
 
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
-- `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks.
+- `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks. It can render completion notifications as terminal-style PNG images when `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` is enabled.
 - `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N`, and forwards ordinary text to the selected task's interactive tmux Codex session.
+- `scripts/weixin-command-router.mjs` sends a small text heartbeat such as `task N · 处理中` before processing ordinary task messages, while immediate commands such as `list` and `task close ...` reply normally.
 - `scripts/weixin-command-router.mjs` starts interactive tasks with `codex --no-alt-screen -C ~/codex/taskN` plus the configured Codex global args, so Weixin can drive native CLI slash commands such as `/plan` and `/goal`.
 - `scripts/weixin-command-router.mjs` maps Weixin `plan ...` to `/plan ...`, and `goal ...` / `goal status` / `goal pause` / `goal resume` / `goal clear` to the native `/goal` command family.
 - `scripts/weixin-command-router.mjs` detects Codex interactive `Question 1/1` choice prompts in tmux output, sends the numbered options back to Weixin, and treats the next numeric Weixin reply as the selected option.
@@ -111,10 +112,11 @@ Important behavior:
 - interactive tmux sessions are fixed by task id, such as `codex-wx-task-0` and `codex-wx-task-1`; they stay open until `task close N` or the Codex CLI exits.
 - `task tmux clean` only removes legacy per-run sessions named like `codex-wx-task-1-wxrun-...` or `codex-wx-task-1-wxr-...`; it does not remove `codex-wx-router` or fixed task sessions.
 - Router startup and ordinary message forwarding refresh stale task runner state. If a task is marked active but its tmux session or pid is gone, the stale runner fields are cleared and pending instructions are resumed instead of leaving future messages stuck in queue.
+- Ordinary task messages and attachment messages send a first text heartbeat before Codex processing. `task snap` sends `task N · 截图中` first. Immediate commands such as `list`, `task N`, `task close ...`, and alias commands do not send a separate heartbeat.
 - Child Codex runs can use `--dangerously-bypass-approvals-and-sandbox` by setting `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true`; existing tmux task sessions must be closed and re-entered before changed Codex arguments take effect.
 - When Codex shows an interactive `Question 1/1` prompt, Weixin should receive the question and numbered choices. Reply with `1`, `2`, etc. to submit that selection inside the task tmux session.
 - `task snap` is a static snapshot only; the user still controls the task by sending normal Weixin text replies.
-- Normal replies render as PNG images only when explicitly enabled with `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1`. The renderer uses Chrome from `chromePath`, `CODEX_WEIXIN_CHROME_PATH`, or common system paths such as `/usr/bin/google-chrome`, with optional width/character/height limits. If rendering or media upload fails, the router falls back to the original text.
+- Normal replies and completion notifications render as PNG images only when explicitly enabled with `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1`. The renderer uses Chrome from `chromePath`, `CODEX_WEIXIN_CHROME_PATH`, or common system paths such as `/usr/bin/google-chrome`, with optional width/character/height limits. If rendering or media upload fails, the sender falls back to the original text.
 - The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.
 - Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
 - Weixin image/file messages go to the current task. Images use Codex `--image`; ordinary files are referenced by saved local path because Codex CLI does not provide a generic `--file` option.

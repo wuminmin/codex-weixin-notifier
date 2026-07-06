@@ -2458,6 +2458,27 @@ async function handleTextWithAttachments(text, fromUser, config, attachments = [
   return forwardToTask(task, text, config, fromUser, savedAttachments);
 }
 
+function inboundHeartbeatText(text, fromUser, attachments = []) {
+  const task = getCurrentTask(fromUser);
+  if (!task) return "";
+  if (attachments.length > 0) return taskHeader(task.id, "处理中");
+
+  const command = parseCommand(text);
+  if (command.type === "message") return taskHeader(task.id, "处理中");
+  if (command.type === "snapshot") return taskHeader(task.id, "截图中");
+  return "";
+}
+
+async function sendInboundHeartbeat(text, fromUser, config, args = {}, attachments = []) {
+  const heartbeat = inboundHeartbeatText(text, fromUser, attachments);
+  if (!heartbeat) return;
+  try {
+    await sendText(heartbeat, config, args);
+  } catch (error) {
+    appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] heartbeat failed: ${error.stack || error.message}\n`);
+  }
+}
+
 function localAttachmentFromPath(filePath) {
   const resolved = path.resolve(expandHome(filePath));
   const stat = fs.statSync(resolved);
@@ -2495,12 +2516,14 @@ async function runPoll(args, config) {
         if (!text && attachments.length === 0) continue;
         rememberRecipientContext(config, message, sync);
         const replyTarget = getReplyTarget(message, config);
-        const response = await handleTextWithAttachments(text, replyTarget, config, attachments);
-        await sendTextWithMedia(response, {
+        const replyConfig = {
           ...config,
           toUser: replyTarget || config.toUser,
           contextToken: message.context_token || config.contextToken,
-        }, args);
+        };
+        await sendInboundHeartbeat(text, replyTarget, replyConfig, args, attachments);
+        const response = await handleTextWithAttachments(text, replyTarget, config, attachments);
+        await sendTextWithMedia(response, replyConfig, args);
       } catch (error) {
         appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] ${error.stack || error.message}\n`);
         process.stderr.write(`${error.stack || error.message}\n`);
