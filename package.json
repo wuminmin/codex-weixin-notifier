@@ -1,5 +1,7 @@
 {
   "dependencies": {
+    "marked": "^18.0.5",
+    "playwright-core": "^1.61.1",
     "qrcode-terminal": "^0.12.0"
   }
 }

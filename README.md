@@ -113,6 +113,7 @@ task reset 1
 task alias 1 godot
 task godot
 task tmux clean
+task snap
 pwd
 ls
 ls /path/to/project
@@ -133,11 +134,13 @@ task alias 1 godot
 task godot
 task unalias godot
 task tmux clean
+task snap
+task screenshot
 pwd
 ls
 ```
 
-`task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, and `task tmux clean` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+`task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
 By default, each task is a long-running interactive Codex session in a fixed tmux session. The router starts task `N` with this shape:
 
@@ -150,6 +153,8 @@ codex --no-alt-screen \
 The router sends ordinary Weixin text into the task tmux session and captures recent terminal output back to Weixin. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
 
 When Codex enters an interactive `Question 1/1` choice prompt, the router formats the question and numbered options for Weixin. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
+
+Send `task snap` or `task screenshot` to render the current task's tmux pane as a terminal-style PNG and send it back as a Weixin image. This is a static snapshot; continue to control Codex by sending normal text replies.
 
 Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create `~/codex/task3`, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
 
@@ -234,7 +239,12 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
   "codexCommand": "codex",
   "codexBypassSandbox": true,
   "codexGlobalArgs": ["--dangerously-bypass-approvals-and-sandbox"],
-  "codexArgs": ["--json", "--skip-git-repo-check"]
+  "codexArgs": ["--json", "--skip-git-repo-check"],
+  "renderMarkdownImages": true,
+  "chromePath": "/usr/bin/google-chrome",
+  "markdownImageWidth": 920,
+  "markdownImageMaxChars": 12000,
+  "markdownImageMaxHeight": 6000
 }
 ```
 
@@ -247,6 +257,8 @@ tmux attach -t codex-wx-task-...
 ```
 
 All task working directories are fixed under `~/codex/taskN`. `CODEX_WEIXIN_TASK_ROOT` can override the root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
+
+Set `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` to render normal text/Markdown replies as terminal-style PNG images before sending them to Weixin. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. If rendering or image upload fails, the router falls back to the original text reply.
 
 ## Weixin Attachments
 

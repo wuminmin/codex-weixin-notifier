@@ -7,6 +7,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { renderMarkdownImage, terminalSnapshotMarkdown } from "./markdown-image-renderer.mjs";
 
 const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
 const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
@@ -42,6 +43,9 @@ const DEFAULT_INTERACTIVE_CAPTURE_LINES = 120;
 const DEFAULT_INTERACTIVE_READY_TIMEOUT_MS = 20000;
 const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 60000;
 const DEFAULT_INTERACTIVE_RESPONSE_POLL_MS = 1000;
+const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
+const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 12_000;
+const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 6000;
 
 const EXTENSION_TO_MIME = {
   ".bmp": "image/bmp",
@@ -233,6 +237,36 @@ function isDryRun(args, config) {
   return args["dry-run"] === "true" || process.env.CODEX_WEIXIN_DRY_RUN === "1" || config.dryRun === true;
 }
 
+function isTruthyConfig(value) {
+  if (value === true) return true;
+  return /^(?:1|true|yes|on)$/iu.test(String(value || "").trim());
+}
+
+function markdownImageRepliesEnabled(config) {
+  return isTruthyConfig(config.renderMarkdownImages) || isTruthyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
+}
+
+function markdownImageNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
+
+function markdownImageOptions(config, title = "Codex Weixin") {
+  return {
+    title,
+    chromePath: valueFrom(config.chromePath, process.env.CODEX_WEIXIN_CHROME_PATH, ""),
+    width: markdownImageNumber(valueFrom(config.markdownImageWidth, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH), DEFAULT_MARKDOWN_IMAGE_WIDTH),
+    maxChars: markdownImageNumber(valueFrom(config.markdownImageMaxChars, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS), DEFAULT_MARKDOWN_IMAGE_MAX_CHARS),
+    maxHeight: markdownImageNumber(valueFrom(config.markdownImageMaxHeight, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT), DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT),
+  };
+}
+
+function canSendMarkdownImage(config, args = {}) {
+  if (!markdownImageRepliesEnabled(config)) return false;
+  if (isDryRun(args, config)) return true;
+  return !valueFrom(config.endpoint, process.env.WEIXIN_ILINK_ENDPOINT);
+}
+
 function taskWorkspaceRoot() {
   return expandHome(valueFrom(process.env.CODEX_WEIXIN_TASK_ROOT, TASK_WORKSPACE_ROOT));
 }
@@ -258,7 +292,7 @@ function fixedTaskCwd(taskId) {
 function isValidAlias(alias) {
   const name = String(alias || "").trim();
   if (!name || /\s/u.test(name) || /^\d+$/u.test(name)) return false;
-  return !new Set(["task", "list", "close", "alias", "unalias", "pwd", "ls"]).has(name.toLowerCase());
+  return !new Set(["task", "list", "close", "alias", "unalias", "pwd", "ls", "snap", "screenshot"]).has(name.toLowerCase());
 }
 
 function normalizeTasksState(state) {
@@ -1128,9 +1162,28 @@ function extractMediaDirectives(text) {
   return { text: kept.join("\n").trim(), media };
 }
 
+async function sendMarkdownImageReply(text, config, args = {}) {
+  if (!String(text || "").trim()) return false;
+  if (!canSendMarkdownImage(config, args)) return false;
+  try {
+    const rendered = await renderMarkdownImage(text, markdownImageOptions(config));
+    await sendMediaFile(rendered.filePath, config, args);
+    return true;
+  } catch (error) {
+    appendTextFile(
+      path.join(LOG_DIR, "markdown-image-errors.log"),
+      `[${new Date().toISOString()}] ${error.stack || error.message}\n`,
+    );
+    return false;
+  }
+}
+
 async function sendTextWithMedia(text, config, args = {}) {
   const parsed = extractMediaDirectives(text);
-  if (parsed.text) await sendText(parsed.text, config, args);
+  if (parsed.text) {
+    const sentImage = await sendMarkdownImageReply(parsed.text, config, args);
+    if (!sentImage) await sendText(parsed.text, config, args);
+  }
   for (const filePath of parsed.media) {
     try {
       await sendMediaFile(filePath, config, args);
@@ -1469,6 +1522,45 @@ function extractInteractiveQuestion(text) {
 function currentInteractiveQuestion(sessionName, config) {
   if (!sessionName || !tmuxHasSession(sessionName)) return null;
   return extractInteractiveQuestion(captureTmuxPane(sessionName, config));
+}
+
+async function taskSnapshotResponse(task, config) {
+  if (!task) return "当前没有可截图的 task。";
+  const refreshed = refreshTaskLiveness(task) || task;
+  const sessionName = refreshed.tmuxSession || makeTmuxSessionName(refreshed);
+  if (!sessionName || !tmuxHasSession(sessionName)) {
+    return [
+      taskHeader(refreshed.id, "没有可截图的 tmux 会话"),
+      "先发送一条普通消息启动该 task，或切换到正在运行的 task。",
+    ].join("\n");
+  }
+
+  let pane = "";
+  try {
+    pane = stripAnsi(captureTmuxPane(sessionName, config));
+    const markdown = terminalSnapshotMarkdown({
+      taskId: refreshed.id,
+      sessionName,
+      paneText: pane,
+    });
+    const rendered = await renderMarkdownImage(
+      markdown,
+      markdownImageOptions(config, `task ${refreshed.id} tmux`),
+    );
+    return `MEDIA:${rendered.filePath}`;
+  } catch (error) {
+    appendTextFile(
+      path.join(LOG_DIR, "markdown-image-errors.log"),
+      `[${new Date().toISOString()}] task snap ${sessionName}: ${error.stack || error.message}\n`,
+    );
+    return [
+      taskHeader(refreshed.id, "截图失败，改发文字"),
+      `会话: ${sessionName}`,
+      `错误: ${error.message}`,
+      "",
+      compactLines(pane || "(暂无可抓取输出)", 3000),
+    ].join("\n");
+  }
 }
 
 function parseInteractiveChoice(text, optionCount) {
@@ -2322,6 +2414,7 @@ function parseCommand(text) {
   const trimmed = String(text || "").trim();
   if (/^list$/iu.test(trimmed)) return { type: "list" };
   if (/^task\s+tmux\s+clean$/iu.test(trimmed)) return { type: "tmux-clean" };
+  if (/^task\s+(?:snap|screenshot)$/iu.test(trimmed)) return { type: "snapshot" };
   const aliasMatch = trimmed.match(/^task\s+alias\s+(\S+)\s+(\S+)$/iu);
   if (aliasMatch) return { type: "alias", target: aliasMatch[1], alias: aliasMatch[2] };
   const unaliasMatch = trimmed.match(/^task\s+unalias\s+(\S+)$/iu);
@@ -2345,6 +2438,7 @@ async function handleText(text, fromUser, config) {
   const command = parseCommand(text);
   if (command.type === "list") return formatList(fromUser);
   if (command.type === "tmux-clean") return cleanupLegacyTaskTmuxSessions({ dryRun: Boolean(config.dryRun) });
+  if (command.type === "snapshot") return taskSnapshotResponse(getCurrentTask(fromUser), config);
   if (command.type === "alias") return setTaskAlias(command.target, command.alias, { dryRun: Boolean(config.dryRun) });
   if (command.type === "unalias") return unsetTaskAlias(command.target, { dryRun: Boolean(config.dryRun) });
   if (command.type === "reset") return resetTaskTargets(command.targets, { dryRun: Boolean(config.dryRun) });
