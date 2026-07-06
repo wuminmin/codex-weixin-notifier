@@ -1,4 +1,11 @@
 {
+  "name": "codex-weixin-notifier",
+  "version": "0.1.0",
+  "description": "Send Weixin notifications and route numbered Codex tasks from Weixin.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "marked": "^18.0.5",
     "playwright-core": "^1.61.1",

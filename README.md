@@ -2,6 +2,56 @@
 
 Local Codex plugin that pairs Weixin by QR code, sends Weixin notifications when Codex work completes, and accepts Weixin commands for starting and extending Codex tasks.
 
+## Install
+
+Review the installer first if you want to inspect what it does:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh
+```
+
+Install or update with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh | bash
+```
+
+The installer:
+
+- Clones this repository into `~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier`.
+- Runs `npm ci --omit=dev`.
+- Generates `~/.codex/plugins/codex-weixin-notifier/marketplace.json`.
+- Registers the local marketplace with `codex plugin marketplace add`.
+- Installs or refreshes the plugin with `codex plugin add codex-weixin-notifier@codex-weixin-notifier`.
+
+Requirements:
+
+- Node.js 20 or newer.
+- `git` and `npm`.
+- `tmux` for Weixin command routing.
+- Codex CLI if you want the plugin registered in Codex.
+
+Installer overrides:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+  | CODEX_WEIXIN_REF=v0.1.0 bash
+
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+  | CODEX_WEIXIN_INSTALL_ROOT="$HOME/.local/share/codex-weixin-notifier" bash
+
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+  | CODEX_WEIXIN_SKIP_CODEX_PLUGIN=1 bash
+```
+
+After installation:
+
+```bash
+node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/pair-weixin.mjs
+node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/bind-recipient.mjs
+~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/start-router-tmux.sh
+```
+
 ## Architecture
 
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
@@ -344,3 +394,33 @@ CODEX_PRODUCT="codex-cli"
 CODEX_SESSION_ID="vscode-${VSCODE_PID:-window}-$$"
 CODEX_PRODUCT="vscode-codex"
 ```
+
+## Publishing
+
+To publish this as a one-line install project:
+
+1. Make the GitHub repository public or otherwise accessible to installers.
+2. Confirm `DEFAULT_REPO_URL` in `install.sh` points at the public repository.
+3. Confirm the included MIT `LICENSE` is the license you want, or replace it before inviting outside users.
+4. Commit and push `install.sh` and this README update.
+5. Tag a stable release, for example `git tag v0.1.0 && git push origin v0.1.0`.
+6. Test from a clean shell:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+  | CODEX_WEIXIN_INSTALL_ROOT=/tmp/codex-weixin-install-test \
+    CODEX_WEIXIN_REF=main \
+    CODEX_WEIXIN_SKIP_CODEX_PLUGIN=1 \
+    bash
+```
+
+For a release-pinned install command, publish:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/v0.1.0/install.sh \
+  | CODEX_WEIXIN_REF=v0.1.0 bash
+```
+
+## License
+
+MIT.
