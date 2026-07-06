@@ -72,13 +72,13 @@ mkdir -p "$INSTALL_ROOT/plugins"
 
 if [ -d "$PLUGIN_DIR/.git" ]; then
   say "Updating $PLUGIN_NAME in $PLUGIN_DIR"
-  git -C "$PLUGIN_DIR" fetch --depth=1 origin "$REPO_REF"
-  git -C "$PLUGIN_DIR" checkout -q FETCH_HEAD
+  git -C "$PLUGIN_DIR" -c advice.detachedHead=false fetch --depth=1 origin "$REPO_REF"
+  git -C "$PLUGIN_DIR" -c advice.detachedHead=false checkout -q FETCH_HEAD
 elif [ -e "$PLUGIN_DIR" ]; then
   die "$PLUGIN_DIR already exists and is not a Git checkout"
 else
   say "Cloning $PLUGIN_NAME into $PLUGIN_DIR"
-  git clone --depth=1 --branch "$REPO_REF" "$REPO_URL" "$PLUGIN_DIR"
+  git -c advice.detachedHead=false clone --quiet --depth=1 --branch "$REPO_REF" "$REPO_URL" "$PLUGIN_DIR"
 fi
 
 if [ "$SKIP_NPM" != "1" ]; then
