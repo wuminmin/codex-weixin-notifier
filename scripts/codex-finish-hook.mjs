@@ -3,8 +3,9 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
-const NOTIFY = "/path/to/codex-weixin-notifier/scripts/notify-weixin.mjs";
+const NOTIFY = fileURLToPath(new URL("./notify-weixin.mjs", import.meta.url));
 const LOG = "/tmp/codex-weixin-notifier-hook.log";
 
 if (process.env.CODEX_WEIXIN_ROUTER_TASK === "1") {

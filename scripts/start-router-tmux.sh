@@ -2,7 +2,9 @@
 set -u
 
 SESSION_NAME="${CODEX_WEIXIN_ROUTER_SESSION:-codex-wx-router}"
-PLUGIN_DIR="${CODEX_WEIXIN_PLUGIN_DIR:-/path/to/codex-weixin-notifier}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+DEFAULT_PLUGIN_DIR="$(dirname -- "$SCRIPT_DIR")"
+PLUGIN_DIR="${CODEX_WEIXIN_PLUGIN_DIR:-$DEFAULT_PLUGIN_DIR}"
 ROUTER_SCRIPT="${CODEX_WEIXIN_ROUTER_SCRIPT:-scripts/weixin-command-router.mjs}"
 NODE_BIN="${CODEX_WEIXIN_NODE:-node}"
 STATE_DIR="${CODEX_WEIXIN_STATE_DIR:-$HOME/.codex/weixin-notifier}"
