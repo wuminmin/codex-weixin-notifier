@@ -140,7 +140,19 @@ Plugin directory:
   $PLUGIN_DIR
 
 Next steps:
+  1. Pair Weixin. Scan the terminal QR code with Weixin and confirm on the phone:
   node "$PLUGIN_DIR/scripts/pair-weixin.mjs"
+
+  2. In Weixin, send this message to the paired bot:
+     bind codex
+
+  3. Bind that Weixin conversation so replies can be sent back:
   node "$PLUGIN_DIR/scripts/bind-recipient.mjs"
+
+  4. Start the Weixin command router:
   "$PLUGIN_DIR/scripts/start-router-tmux.sh"
+
+  5. In Weixin, send:
+     list
+     summarize this repository
 EOF

@@ -52,10 +52,18 @@ node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/script
 ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/start-router-tmux.sh
 ```
 
+First-run journey:
+
+1. Run `pair-weixin.mjs` in the WSL terminal. It prints a terminal QR code; scan it with Weixin and confirm authorization on the phone.
+2. Send `bind codex` to the paired Weixin bot, then run `bind-recipient.mjs` in the terminal. This captures the recipient and `contextToken` required by iLink sends.
+3. Start the router with `start-router-tmux.sh`. The command is idempotent and should print `codex-wx-router: started` or `already running`.
+4. In Weixin, send `list` to confirm the bot is alive, then send the first real request, for example `summarize this repository`. Ordinary text is forwarded to the current task, normally `task 0`.
+5. If Codex asks a `Question 1/1` multiple-choice prompt, Weixin receives the numbered options. Reply with `1`, `2`, etc. to answer it.
+
 ## Architecture
 
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
-- `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint. When Markdown image rendering is enabled, completion notifications are sent as terminal-style PNG images.
+- `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint. When Markdown image rendering is enabled, completion notifications are sent as one or more terminal-style PNG images.
 - `scripts/weixin-command-router.mjs` long-polls inbound Weixin messages, keeps a numbered task list, switches the current task with `task N`, and forwards ordinary text to the selected Codex task.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
@@ -114,10 +122,11 @@ node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
   --summary "This is a formatting-only test."
 ```
 
-When Markdown image rendering is enabled, the dry run prints the generated image path instead of uploading:
+When Markdown image rendering is enabled, the dry run prints the generated image path or paths instead of uploading:
 
 ```text
-[dry-run media] image /tmp/codex-weixin-md-.../reply.png ...
+[dry-run media] image /tmp/codex-weixin-md-.../reply-01.png ...
+[dry-run media] image /tmp/codex-weixin-md-.../reply-02.png ...
 ```
 
 Real send after pairing:
@@ -196,23 +205,23 @@ pwd
 ls
 ```
 
-`task 0` is the default Codex assistant and always exists at `~/codex/task0`. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+`task 0` is the default Codex assistant and always exists. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
 By default, each task is a long-running interactive Codex session in a fixed tmux session. The router starts task `N` with this shape:
 
 ```bash
 codex --no-alt-screen \
   --dangerously-bypass-approvals-and-sandbox \
-  -C ~/codex/taskN
+  -C "${CODEX_WEIXIN_CODEX_CWD:-$HOME}"
 ```
 
 When the router receives an ordinary task message, it first sends a small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and captures recent terminal output back to Weixin. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
 
 When Codex enters an interactive `Question 1/1` choice prompt, the router formats the question and numbered options for Weixin. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
 
-Send `task snap` or `task screenshot` to render the current task's tmux pane as a terminal-style PNG and send it back as a Weixin image. This is a static snapshot; continue to control Codex by sending normal text replies.
+Send `task snap` or `task screenshot` to render the current task's tmux pane as one or more terminal-style PNG images and send them back to Weixin. This is a static snapshot; continue to control Codex by sending normal text replies.
 
-Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create `~/codex/task3`, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
+Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create a task slot and data directory, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
 
 `task close` accepts one or more task ids or aliases:
 
@@ -221,7 +230,7 @@ task close 1
 task close 1 godot
 ```
 
-`task reset` accepts one or more task ids or aliases. It clears Codex resume state so the next message starts a fresh Codex session in the same fixed task directory. It does not delete files, aliases, task ids, historical log files, or `~/codex/taskN` content; it only clears the task's pointer to the previous run logs so old session ids cannot be restored. Running tasks must be closed first:
+`task reset` accepts one or more task ids or aliases. It clears Codex resume state so the next message starts a fresh Codex session in the configured working directory. It does not delete files, aliases, task ids, historical log files, or `~/codex/taskN` data directory content; it only clears the task's pointer to the previous run logs so old session ids cannot be restored. Running tasks must be closed first:
 
 ```text
 task close 1
@@ -252,13 +261,13 @@ task 1: completed
 ```text
 task 0 [default,current]
 状态: default
-目录: ~/codex/task0
+工作目录: ~
 摘要: 默认 Codex 助理
 
 task 1 [running]
 别名: godot
 状态: running
-目录: ~/codex/task1
+工作目录: ~
 摘要: 修改微信路由
 ```
 
@@ -293,13 +302,14 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 ```json
 {
   "codexCommand": "codex",
+  "codexCwd": "~",
   "codexBypassSandbox": true,
   "codexGlobalArgs": ["--dangerously-bypass-approvals-and-sandbox"],
   "codexArgs": ["--json", "--skip-git-repo-check"],
   "renderMarkdownImages": true,
   "chromePath": "/usr/bin/google-chrome",
   "markdownImageWidth": 920,
-  "markdownImageMaxChars": 12000,
+  "markdownImageMaxChars": 120000,
   "markdownImageMaxHeight": 6000
 }
 ```
@@ -312,16 +322,16 @@ For this WSL-first setup, Weixin tasks can run interactive Codex with `--dangero
 tmux attach -t codex-wx-task-...
 ```
 
-All task working directories are fixed under `~/codex/taskN`. `CODEX_WEIXIN_TASK_ROOT` can override the root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
+By default, task Codex sessions use `$HOME` as their working directory instead of being pinned to `~/codex/taskN`. Set `CODEX_WEIXIN_CODEX_CWD` or `"codexCwd"` to choose a different default working directory. `~/codex/taskN` is still used as the task data directory for inbound attachments and durable task metadata; `CODEX_WEIXIN_TASK_ROOT` can override that data root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
 
-Set `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` to render normal text/Markdown replies and completion notifications as terminal-style PNG images before sending them to Weixin. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. If rendering or image upload fails, the sender falls back to the original text reply.
+Set `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` to render normal text/Markdown replies and completion notifications as terminal-style PNG images before sending them to Weixin. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. `markdownImageMaxHeight` is the per-image output PNG height; longer content is sent as multiple images instead of being clipped. If rendering or image upload fails, the sender falls back to the original text reply.
 
 ## Weixin Attachments
 
 The command router accepts inbound Weixin image and file messages for the current task:
 
-- Inbound images are downloaded into `~/codex/taskN/inbox/` and passed to Codex with `codex exec --image /path/to/image`.
-- Inbound files are downloaded into `~/codex/taskN/inbox/` and their local paths are included in the Codex prompt so the task can read them directly.
+- Inbound images are downloaded into the task data directory, normally `~/codex/taskN/inbox/`, and passed to Codex with `codex exec --image /path/to/image`.
+- Inbound files are downloaded into the task data directory, normally `~/codex/taskN/inbox/`, and their local paths are included in the Codex prompt so the task can read them directly.
 - If a task is already running, the text plus attachment paths are queued together and started after the current run finishes.
 - Attachments use the same 20 MB default size limit as media replies; override it with `CODEX_WEIXIN_MAX_MEDIA_BYTES` or `maxMediaBytes`.
 
@@ -394,6 +404,8 @@ CODEX_PRODUCT="codex-cli"
 CODEX_SESSION_ID="vscode-${VSCODE_PID:-window}-$$"
 CODEX_PRODUCT="vscode-codex"
 ```
+
+For Codex Stop hooks, use `scripts/codex-finish-hook.mjs` instead of calling `notify-weixin.mjs` directly. The hook writes the event to `/tmp/codex-weixin-notifier-hooks/`, starts `notify-weixin.mjs` in a short-lived background tmux session, and exits immediately so Codex does not fail the hook when Weixin rendering or upload takes longer than the host hook timeout. Hook launcher and sender output is appended to `/tmp/codex-weixin-notifier-hook.log`.
 
 ## Publishing
 

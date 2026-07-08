@@ -10,10 +10,11 @@
   "maxSummaryLength": 800,
   "workspaceRoot": "/path/to/workspaces",
   "codexCommand": "codex",
+  "codexCwd": "~",
   "codexArgs": ["--json", "--skip-git-repo-check", "--ask-for-approval", "never"],
   "renderMarkdownImages": false,
   "chromePath": "/usr/bin/google-chrome",
   "markdownImageWidth": 920,
-  "markdownImageMaxChars": 12000,
+  "markdownImageMaxChars": 120000,
   "markdownImageMaxHeight": 6000
 }

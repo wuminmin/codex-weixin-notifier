@@ -7,7 +7,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { renderMarkdownImage, terminalSnapshotMarkdown } from "./markdown-image-renderer.mjs";
+import { renderMarkdownImages, terminalSnapshotMarkdown } from "./markdown-image-renderer.mjs";
 
 const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
 const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
@@ -44,8 +44,9 @@ const DEFAULT_INTERACTIVE_READY_TIMEOUT_MS = 20000;
 const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 60000;
 const DEFAULT_INTERACTIVE_RESPONSE_POLL_MS = 1000;
 const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
-const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 12_000;
+const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
 const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 6000;
+let runtimeConfig = {};
 
 const EXTENSION_TO_MIME = {
   ".bmp": "image/bmp",
@@ -226,11 +227,13 @@ function normalizeCompatAccount(account) {
 
 function loadConfig(args) {
   const configPath = valueFrom(args.config, process.env.CODEX_WEIXIN_CONFIG, DEFAULT_CONFIG_PATH);
-  return {
+  const config = {
     ...normalizeCompatAccount(readJsonFile(COMPAT_ACCOUNT_PATH, {})),
     ...readJsonFile(configPath, {}),
     configPath,
   };
+  runtimeConfig = config;
+  return config;
 }
 
 function isDryRun(args, config) {
@@ -271,22 +274,50 @@ function taskWorkspaceRoot() {
   return expandHome(valueFrom(process.env.CODEX_WEIXIN_TASK_ROOT, TASK_WORKSPACE_ROOT));
 }
 
-function taskCwd(taskId) {
+function taskDataDir(taskId) {
   return path.join(taskWorkspaceRoot(), `task${taskId}`);
 }
 
-function ensureTaskCwd(taskId) {
-  const cwd = taskCwd(taskId);
-  fs.mkdirSync(cwd, { recursive: true });
-  return cwd;
+function ensureTaskDataDir(taskId) {
+  const dir = taskDataDir(taskId);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function isTaskActive(task) {
   return ["running", "starting", "queued"].includes(task?.status);
 }
 
-function fixedTaskCwd(taskId) {
-  return ensureTaskCwd(taskId);
+function normalizePathForCompare(value) {
+  return path.resolve(expandHome(value || "."));
+}
+
+function isLegacyTaskCwd(taskId, cwd) {
+  return normalizePathForCompare(cwd) === normalizePathForCompare(taskDataDir(taskId));
+}
+
+function realConfiguredPath(value) {
+  const text = String(value || "").trim();
+  if (!text || text.startsWith("/path/to/")) return "";
+  return text;
+}
+
+function defaultCodexCwd(config = runtimeConfig) {
+  const cwd = expandHome(valueFrom(
+    realConfiguredPath(process.env.CODEX_WEIXIN_CODEX_CWD),
+    realConfiguredPath(config.codexCwd),
+    realConfiguredPath(config.codexCWD),
+    realConfiguredPath(process.env.CODEX_WEIXIN_WORKSPACE_ROOT),
+    realConfiguredPath(config.workspaceRoot),
+    os.homedir(),
+  ));
+  fs.mkdirSync(cwd, { recursive: true });
+  return cwd;
+}
+
+function taskWorkingCwd(taskId, currentCwd = "", config = runtimeConfig) {
+  if (!currentCwd || isLegacyTaskCwd(taskId, currentCwd)) return defaultCodexCwd(config);
+  return expandHome(currentCwd);
 }
 
 function isValidAlias(alias) {
@@ -295,80 +326,81 @@ function isValidAlias(alias) {
   return !new Set(["task", "list", "close", "alias", "unalias", "pwd", "ls", "snap", "screenshot"]).has(name.toLowerCase());
 }
 
-function normalizeTasksState(state) {
+function taskNeedsCwdReset(task) {
+  return !task.cwd
+    || (!isTaskActive(task) && isLegacyTaskCwd(task.id, task.cwd))
+    || (!isTaskActive(task) && !fs.existsSync(expandHome(task.cwd)));
+}
+
+function clearTaskRunnerState(task) {
+  task.codexSessionId = "";
+  task.resumeOf = "";
+  task.resumeLast = false;
+  task.logs = {};
+  task.pid = "";
+  task.tmuxSession = "";
+  task.tmuxPanePid = "";
+  task.tmuxAttach = "";
+}
+
+function normalizeOneTask(task, config = runtimeConfig) {
+  const normalized = {
+    ...task,
+    dataDir: ensureTaskDataDir(task.id),
+  };
+  if (taskNeedsCwdReset(normalized)) {
+    normalized.cwd = taskWorkingCwd(normalized.id, "", config);
+    clearTaskRunnerState(normalized);
+    if (String(normalized.id) === DEFAULT_TASK_ID) normalized.status = "default";
+  } else {
+    normalized.cwd = expandHome(normalized.cwd);
+  }
+  normalized.kind = String(normalized.id) === DEFAULT_TASK_ID ? "default" : normalized.kind || "task";
+  normalized.intent = normalized.intent || (String(normalized.id) === DEFAULT_TASK_ID ? "默认 Codex 助理" : `微信任务 task ${normalized.id}`);
+  normalized.status = normalized.status || (String(normalized.id) === DEFAULT_TASK_ID ? "default" : "ready");
+  normalized.pendingInstructions = Array.isArray(normalized.pendingInstructions) ? normalized.pendingInstructions : [];
+  if (normalized.alias && !isValidAlias(normalized.alias)) normalized.alias = "";
+  return normalized;
+}
+
+function normalizeTasksState(state, config = runtimeConfig) {
   const tasks = Array.isArray(state?.tasks) ? [...state.tasks] : [];
   let nextTaskId = Number(state?.nextTaskId || 1);
-  let defaultTask = tasks.find((task) => String(task.id) === DEFAULT_TASK_ID);
-  if (!defaultTask) {
-    defaultTask = {
+  if (!tasks.some((task) => String(task.id) === DEFAULT_TASK_ID)) {
+    tasks.unshift({
       id: DEFAULT_TASK_ID,
       kind: "default",
       intent: "默认 Codex 助理",
-      cwd: fixedTaskCwd(DEFAULT_TASK_ID),
+      cwd: taskWorkingCwd(DEFAULT_TASK_ID, "", config),
+      dataDir: ensureTaskDataDir(DEFAULT_TASK_ID),
       status: "default",
       createdAt: new Date().toISOString(),
       pendingInstructions: [],
-    };
-    tasks.unshift(defaultTask);
-  } else {
-    defaultTask.kind = "default";
-    defaultTask.intent = defaultTask.intent || "默认 Codex 助理";
-    if (!defaultTask.cwd || defaultTask.cwd !== fixedTaskCwd(DEFAULT_TASK_ID)) {
-      defaultTask.cwd = fixedTaskCwd(DEFAULT_TASK_ID);
-      defaultTask.codexSessionId = "";
-      defaultTask.resumeOf = "";
-      defaultTask.resumeLast = false;
-      if (!isTaskActive(defaultTask)) {
-        defaultTask.logs = {};
-        defaultTask.pid = "";
-        defaultTask.tmuxSession = "";
-        defaultTask.tmuxPanePid = "";
-        defaultTask.tmuxAttach = "";
-        defaultTask.status = "default";
-      }
-    }
-    defaultTask.status = defaultTask.status || "default";
-    defaultTask.pendingInstructions = Array.isArray(defaultTask.pendingInstructions) ? defaultTask.pendingInstructions : [];
+    });
   }
 
-  for (const task of tasks) {
-    const numericId = Number(task.id);
+  for (let index = 0; index < tasks.length; index += 1) {
+    const numericId = Number(tasks[index].id);
     if (Number.isInteger(numericId) && numericId >= 0) {
-      const fixedCwd = fixedTaskCwd(String(task.id));
-      if (!task.cwd || task.cwd !== fixedCwd) {
-        task.cwd = fixedCwd;
-        task.codexSessionId = "";
-        task.resumeOf = "";
-        task.resumeLast = false;
-        if (!isTaskActive(task)) {
-          task.logs = {};
-          task.pid = "";
-          task.tmuxSession = "";
-          task.tmuxPanePid = "";
-          task.tmuxAttach = "";
-        }
-      }
-      task.kind = String(task.id) === DEFAULT_TASK_ID ? "default" : task.kind || "task";
-      task.intent = task.intent || (String(task.id) === DEFAULT_TASK_ID ? "默认 Codex 助理" : `微信任务 task ${task.id}`);
-      task.pendingInstructions = Array.isArray(task.pendingInstructions) ? task.pendingInstructions : [];
-      if (task.alias && !isValidAlias(task.alias)) task.alias = "";
+      tasks[index] = normalizeOneTask(tasks[index], config);
     }
     if (Number.isInteger(numericId) && numericId >= nextTaskId) nextTaskId = numericId + 1;
   }
   return { tasks, nextTaskId: Math.max(1, nextTaskId) };
 }
 
-function loadTasks() {
-  return normalizeTasksState(readJsonFile(TASKS_PATH, { tasks: [] }));
+function loadTasks(config = runtimeConfig) {
+  return normalizeTasksState(readJsonFile(TASKS_PATH, { tasks: [] }), config);
 }
 
-function saveTasks(state) {
-  const normalized = normalizeTasksState(state);
-  return writeJsonFile(TASKS_PATH, {
+function saveTasks(state, config = runtimeConfig) {
+  const normalized = normalizeTasksState(state, config);
+  writeJsonFile(TASKS_PATH, {
     tasks: normalized.tasks,
     nextTaskId: normalized.nextTaskId,
     updatedAt: new Date().toISOString(),
   });
+  return normalized;
 }
 
 function loadCurrentTasks() {
@@ -431,8 +463,8 @@ function updateTask(taskId, updater) {
   const index = state.tasks.findIndex((task) => String(task.id) === String(taskId));
   if (index === -1) return null;
   state.tasks[index] = updater({ ...state.tasks[index] });
-  saveTasks(state);
-  return state.tasks[index];
+  const saved = saveTasks(state);
+  return saved.tasks.find((task) => String(task.id) === String(taskId)) || null;
 }
 
 function createTaskSlot(taskId, fromUser = "", options = {}) {
@@ -451,12 +483,14 @@ function createTaskSlot(taskId, fromUser = "", options = {}) {
     return { ok: false, message: `task ${id}: 不存在。只能创建 task ${nextId}，task id 必须每次加 1。` };
   }
 
-  const cwd = fixedTaskCwd(id);
+  const cwd = taskWorkingCwd(id, "", runtimeConfig);
+  const dataDir = ensureTaskDataDir(id);
   const task = {
     id,
     kind: "task",
     intent: `微信任务 task ${id}`,
     cwd,
+    dataDir,
     status: "ready",
     fromUser,
     createdAt: new Date().toISOString(),
@@ -489,7 +523,7 @@ function enterTask(target, fromUser = "", options = {}) {
       return [
         taskHeader(task.id, "将创建并进入"),
         `状态: ${task.status || "unknown"}`,
-        `目录: ${task.cwd}`,
+        `工作目录: ${task.cwd}`,
       ].join("\n");
     }
 
@@ -498,7 +532,7 @@ function enterTask(target, fromUser = "", options = {}) {
     return [
       taskHeader(task.id, created ? "已创建并进入" : "已进入"),
       `状态: ${task.status || "unknown"}`,
-      `目录: ${task.cwd}`,
+      `工作目录: ${task.cwd}`,
       task.alias ? `别名: ${task.alias}` : null,
     ].filter(Boolean).join("\n");
   }
@@ -511,7 +545,7 @@ function enterTask(target, fromUser = "", options = {}) {
     taskHeader(task.id, "已进入"),
     `别名: ${task.alias}`,
     `状态: ${task.status || "unknown"}`,
-    `目录: ${task.cwd}`,
+    `工作目录: ${task.cwd}`,
   ].join("\n");
 }
 
@@ -532,7 +566,7 @@ function setTaskAlias(taskTarget, alias, options = {}) {
     alias: name,
     updatedAt: new Date().toISOString(),
   }));
-  return [`task ${updated.id} · 已设置别名`, `别名: ${updated.alias}`, `目录: ${updated.cwd}`].join("\n");
+  return [`task ${updated.id} · 已设置别名`, `别名: ${updated.alias}`, `工作目录: ${updated.cwd}`].join("\n");
 }
 
 function unsetTaskAlias(target, options = {}) {
@@ -575,7 +609,7 @@ function resetTaskTargets(targets, options = {}) {
     if (options.dryRun) {
       lines.push([
         taskHeader(task.id, "将 reset"),
-        `目录: ${task.cwd}`,
+        `工作目录: ${task.cwd}`,
         "会清除: codexSessionId/resumeOf/resumeLast/pendingInstructions/pid/tmuxSession/runId/log refs",
       ].join("\n"));
       continue;
@@ -603,7 +637,7 @@ function resetTaskTargets(targets, options = {}) {
     lines.push([
       taskHeader(updated.id, "已 reset"),
       `状态: ${updated.status}`,
-      `目录: ${updated.cwd}`,
+      `工作目录: ${updated.cwd}`,
     ].join("\n"));
   }
   return lines.join("\n\n");
@@ -729,7 +763,7 @@ function sanitizeFileStem(value, fallback) {
 }
 
 function inboundFilePath(task, attachment) {
-  const dir = path.join(task.cwd, INBOUND_MEDIA_DIR);
+  const dir = path.join(task.dataDir || ensureTaskDataDir(task.id), INBOUND_MEDIA_DIR);
   fs.mkdirSync(dir, { recursive: true });
   const ext = inboundFileExtension(attachment);
   const stem = sanitizeFileStem(attachment.fileName, attachment.kind === "image" ? "weixin-image" : "weixin-file");
@@ -1166,8 +1200,8 @@ async function sendMarkdownImageReply(text, config, args = {}) {
   if (!String(text || "").trim()) return false;
   if (!canSendMarkdownImage(config, args)) return false;
   try {
-    const rendered = await renderMarkdownImage(text, markdownImageOptions(config));
-    await sendMediaFile(rendered.filePath, config, args);
+    const rendered = await renderMarkdownImages(text, markdownImageOptions(config));
+    for (const filePath of rendered.filePaths) await sendMediaFile(filePath, config, args);
     return true;
   } catch (error) {
     appendTextFile(
@@ -1543,11 +1577,11 @@ async function taskSnapshotResponse(task, config) {
       sessionName,
       paneText: pane,
     });
-    const rendered = await renderMarkdownImage(
+    const rendered = await renderMarkdownImages(
       markdown,
       markdownImageOptions(config, `task ${refreshed.id} tmux`),
     );
-    return `MEDIA:${rendered.filePath}`;
+    return rendered.filePaths.map((filePath) => `MEDIA:${filePath}`).join("\n");
   } catch (error) {
     appendTextFile(
       path.join(LOG_DIR, "markdown-image-errors.log"),
@@ -2241,7 +2275,7 @@ function closeTaskTargets(targets, fromUser = "", options = {}) {
       lines.push([
         taskHeader(task.id, "将关闭"),
         `会话: ${task.tmuxSession || task.pid || "未记录"}`,
-        `目录: ${task.cwd}`,
+        `工作目录: ${task.cwd}`,
       ].join("\n"));
       continue;
     }
@@ -2286,7 +2320,7 @@ function closeTaskTargets(targets, fromUser = "", options = {}) {
     lines.push([
       taskHeader(task.id, "已关闭"),
       killed ? "会话: 已停止" : "会话: 未运行或已不存在",
-      `目录: ${task.cwd}`,
+      `工作目录: ${task.cwd}`,
     ].join("\n"));
   }
   return lines.join("\n\n");
@@ -2396,7 +2430,7 @@ function formatTaskBlock(task, fromUser = "") {
     `task ${task.id} [${tags.join(",")}]`,
     task.alias ? `别名: ${task.alias}` : null,
     `状态: ${task.status || "unknown"}`,
-    `目录: ${task.cwd}`,
+    `工作目录: ${task.cwd}`,
   ].filter(Boolean);
   if (task.intent) lines.push(`摘要: ${compact(task.intent, 80)}`);
   return lines.join("\n");

@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { renderMarkdownImage } from "./markdown-image-renderer.mjs";
+import { renderMarkdownImages } from "./markdown-image-renderer.mjs";
 
 const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
 const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
@@ -20,7 +20,7 @@ const MESSAGE_ITEM_IMAGE = 2;
 const MEDIA_TYPE_IMAGE = 1;
 const DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
-const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 12_000;
+const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
 const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 6000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 
@@ -63,6 +63,15 @@ async function readStdinJson() {
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) return {};
   return JSON.parse(raw);
+}
+
+async function readEventJson(args) {
+  if (args["event-file"]) {
+    const eventPath = expandHome(args["event-file"]);
+    const raw = fs.readFileSync(eventPath, "utf8").trim();
+    return raw ? JSON.parse(raw) : {};
+  }
+  return readStdinJson();
 }
 
 function valueFrom(...values) {
@@ -134,6 +143,31 @@ function normalizeEvent(event, args) {
   };
 }
 
+function normalizedPath(value) {
+  return path.resolve(expandHome(String(value || "")));
+}
+
+function samePathValue(left, right) {
+  if (!left || !right) return false;
+  try {
+    return normalizedPath(left) === normalizedPath(right);
+  } catch {
+    return String(left) === String(right);
+  }
+}
+
+function shouldShowTask(event) {
+  const task = String(event.task || "").trim();
+  if (!task) return false;
+  return !samePathValue(task, event.workspace);
+}
+
+function shouldShowWorkspace(event) {
+  const workspace = String(event.workspace || "").trim();
+  if (!workspace) return false;
+  return !samePathValue(event.task, workspace);
+}
+
 function formatMessage(event, config) {
   const maxSummaryLength = Number(config.maxSummaryLength || 800);
   const summary = event.summary.length > maxSummaryLength
@@ -145,12 +179,12 @@ function formatMessage(event, config) {
     `Status: ${event.status}`,
     `Session: ${event.sessionId}`,
     `Source: ${event.source}`,
-    `Workspace: ${event.workspace}`,
-    `Task: ${event.task}`,
-    `Finished: ${event.finishedAt}`,
   ];
 
-  if (event.startedAt) lines.splice(6, 0, `Started: ${event.startedAt}`);
+  if (shouldShowWorkspace(event)) lines.push(`Workspace: ${event.workspace}`);
+  if (shouldShowTask(event)) lines.push(`Task: ${event.task}`);
+  if (event.startedAt) lines.push(`Started: ${event.startedAt}`);
+  lines.push(`Finished: ${event.finishedAt}`);
   if (summary) lines.push("", summary);
   return lines.join("\n");
 }
@@ -221,7 +255,7 @@ function buildOfficialSendMessageRequest(message, event, config) {
   };
 }
 
-function buildOfficialMessageItemRequest(item, event, config) {
+function buildOfficialMessageItemsRequest(items, event, config) {
   const token = valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN);
   const baseUrl = valueFrom(config.baseUrl, config.baseurl, process.env.WEIXIN_ILINK_BASE_URL, DEFAULT_ILINK_BASE_URL);
   const toUser = valueFrom(config.toUser, config.userId, config.ilinkUserId, process.env.WEIXIN_TO_USER);
@@ -247,7 +281,7 @@ function buildOfficialMessageItemRequest(item, event, config) {
         client_id: `codex-weixin-${event.sessionId}-${Date.now()}`,
         message_type: MESSAGE_TYPE_BOT,
         message_state: MESSAGE_STATE_FINISH,
-        item_list: [item],
+        item_list: items,
         context_token: contextToken,
       },
       base_info: {
@@ -440,20 +474,30 @@ function imageItemFromUpload(uploaded) {
   };
 }
 
+async function postOfficialImageItems(items, event, config, args) {
+  const timeoutMs = Number(valueFrom(args.timeout, config.timeoutMs, DEFAULT_TIMEOUT_MS));
+  for (const item of items) {
+    const request = buildOfficialMessageItemsRequest([item], event, config);
+    await postJson(request.endpoint, request.headers, request.body, timeoutMs);
+  }
+}
+
 async function trySendMarkdownImageNotification(message, event, config, args) {
   if (!markdownImageRepliesEnabled(config)) return false;
   if (config.endpoint || process.env.WEIXIN_ILINK_ENDPOINT) return false;
   try {
-    const rendered = await renderMarkdownImage(message, markdownImageOptions(config, config.title || "Codex task completed"));
+    const rendered = await renderMarkdownImages(message, markdownImageOptions(config, config.title || "Codex task completed"));
     if (config.dryRun) {
-      const stat = fs.statSync(rendered.filePath);
-      process.stdout.write(`[dry-run media] image ${rendered.filePath} ${stat.size} bytes\n`);
+      for (const filePath of rendered.filePaths) {
+        const stat = fs.statSync(filePath);
+        process.stdout.write(`[dry-run media] image ${filePath} ${stat.size} bytes\n`);
+      }
       return true;
     }
-    const uploaded = await uploadImageFile(rendered.filePath, config);
-    const { endpoint, headers, body } = buildOfficialMessageItemRequest(imageItemFromUpload(uploaded), event, config);
-    const timeoutMs = Number(valueFrom(args.timeout, config.timeoutMs, DEFAULT_TIMEOUT_MS));
-    await postJson(endpoint, headers, body, timeoutMs);
+    const uploaded = [];
+    for (const filePath of rendered.filePaths) uploaded.push(await uploadImageFile(filePath, config));
+    const items = uploaded.map(imageItemFromUpload);
+    await postOfficialImageItems(items, event, config, args);
     return true;
   } catch (error) {
     process.stderr.write(`[markdown-image-fallback] ${error.message}\n`);
@@ -463,7 +507,7 @@ async function trySendMarkdownImageNotification(message, event, config, args) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const stdinEvent = await readStdinJson();
+  const stdinEvent = await readEventJson(args);
   const configPath = valueFrom(args.config, process.env.CODEX_WEIXIN_CONFIG, DEFAULT_CONFIG_PATH);
   const config = {
     ...normalizeCompatAccount(readJsonFile(COMPAT_ACCOUNT_PATH)),

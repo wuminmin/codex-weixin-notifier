@@ -9,9 +9,11 @@ import { marked } from "marked";
 import { chromium } from "playwright-core";
 
 const DEFAULT_WIDTH = 920;
-const DEFAULT_MAX_CHARS = 12_000;
+const DEFAULT_MAX_CHARS = 120_000;
 const DEFAULT_MAX_HEIGHT = 6000;
 const DEFAULT_TITLE = "Codex Weixin";
+const DEFAULT_DEVICE_SCALE_FACTOR = 2;
+const MIN_IMAGE_HEIGHT = 120;
 const CHROME_CANDIDATES = [
   "/usr/bin/google-chrome",
   "/usr/bin/google-chrome-stable",
@@ -39,7 +41,7 @@ function findChromePath(requested = "") {
 function clampText(text, maxChars) {
   const value = String(text || "").replace(/\r\n/g, "\n").trimEnd();
   if (value.length <= maxChars) return { text: value, truncated: false };
-  const suffix = "\n\n_输出已截断，避免微信图片过大。_";
+  const suffix = "\n\n_输出已超过 markdownImageMaxChars，后续内容已截断，避免微信图片过大。_";
   return {
     text: `${value.slice(0, Math.max(0, maxChars - suffix.length)).trimEnd()}${suffix}`,
     truncated: true,
@@ -196,10 +198,16 @@ export function terminalSnapshotMarkdown({ taskId = "", sessionName = "", paneTe
   return `${header}\n\n\`\`\`text\n${fenceSafe.trimEnd() || "(empty pane)"}\n\`\`\``;
 }
 
-export async function renderMarkdownImage(markdown, options = {}) {
+function pageImagePath(dir, pageIndex, pageCount) {
+  if (pageCount === 1) return path.join(dir, "reply.png");
+  return path.join(dir, `reply-${String(pageIndex + 1).padStart(2, "0")}.png`);
+}
+
+export async function renderMarkdownImages(markdown, options = {}) {
   const maxChars = coercePositiveInteger(options.maxChars, DEFAULT_MAX_CHARS);
   const width = coercePositiveInteger(options.width, DEFAULT_WIDTH);
   const maxHeight = coercePositiveInteger(options.maxHeight, DEFAULT_MAX_HEIGHT);
+  const deviceScaleFactor = coercePositiveInteger(options.deviceScaleFactor, DEFAULT_DEVICE_SCALE_FACTOR);
   const title = String(options.title || DEFAULT_TITLE);
   const chromePath = findChromePath(options.chromePath || process.env.CODEX_WEIXIN_CHROME_PATH);
   const { text, truncated } = clampText(markdown, maxChars);
@@ -211,7 +219,6 @@ export async function renderMarkdownImage(markdown, options = {}) {
   });
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-md-"));
-  const filePath = path.join(dir, "reply.png");
   const browser = await chromium.launch({
     executablePath: chromePath,
     headless: true,
@@ -224,7 +231,7 @@ export async function renderMarkdownImage(markdown, options = {}) {
   });
   try {
     const page = await browser.newPage({
-      deviceScaleFactor: 2,
+      deviceScaleFactor,
       viewport: { width, height: 800 },
     });
     await page.setContent(pageHtml({ body, title }), { waitUntil: "load" });
@@ -232,40 +239,47 @@ export async function renderMarkdownImage(markdown, options = {}) {
     const contentHeight = await page.$eval(".terminal", (element) => {
       return Math.ceil(element.getBoundingClientRect().height);
     });
-    const height = Math.min(Math.max(contentHeight, 120), maxHeight);
-    await page.setViewportSize({ width, height });
-    if (contentHeight > maxHeight) {
-      await page.evaluate(() => {
-        const note = document.createElement("div");
-        note.textContent = "图片高度已截断；可调大 markdownImageMaxHeight 或缩短输出。";
-        note.style.cssText = [
-          "position:fixed",
-          "left:24px",
-          "right:24px",
-          "bottom:18px",
-          "padding:10px 12px",
-          "border:1px solid #614a20",
-          "border-radius:8px",
-          "background:#1d1609",
-          "color:#f3d08a",
-          "font:14px/1.4 ui-monospace, Menlo, Consolas, monospace",
-        ].join(";");
-        document.body.appendChild(note);
+    const totalHeight = Math.max(contentHeight, MIN_IMAGE_HEIGHT);
+    const pageHeight = Math.max(Math.floor(maxHeight / deviceScaleFactor), MIN_IMAGE_HEIGHT);
+    const pageCount = Math.max(1, Math.ceil(totalHeight / pageHeight));
+    const filePaths = [];
+    for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+      const offset = pageIndex * pageHeight;
+      const remaining = totalHeight - offset;
+      const height = Math.min(pageHeight, Math.max(remaining, MIN_IMAGE_HEIGHT));
+      await page.setViewportSize({ width, height });
+      await page.evaluate((y) => {
+        window.scrollTo(0, y);
+      }, offset);
+      const filePath = pageImagePath(dir, pageIndex, pageCount);
+      await page.screenshot({
+        path: filePath,
+        type: "png",
       });
+      filePaths.push(filePath);
     }
-    await page.screenshot({
-      path: filePath,
-      type: "png",
-      clip: { x: 0, y: 0, width, height },
-    });
+    return {
+      filePath: filePaths[0],
+      filePaths,
+      pageCount,
+      pageHeight,
+      maxHeight,
+      deviceScaleFactor,
+      contentHeight,
+      truncated,
+      charCount: text.length,
+      chromePath,
+    };
   } finally {
     await browser.close();
   }
+}
+
+export async function renderMarkdownImage(markdown, options = {}) {
+  const rendered = await renderMarkdownImages(markdown, options);
   return {
-    filePath,
-    truncated,
-    charCount: text.length,
-    chromePath,
+    ...rendered,
+    filePath: rendered.filePaths[0],
   };
 }
 
@@ -277,8 +291,8 @@ async function readStdin() {
 
 async function cli() {
   const input = process.argv.length > 2 ? process.argv.slice(2).join(" ") : await readStdin();
-  const result = await renderMarkdownImage(input || "Codex Weixin markdown image smoke test.");
-  process.stdout.write(`${result.filePath}\n`);
+  const result = await renderMarkdownImages(input || "Codex Weixin markdown image smoke test.");
+  process.stdout.write(`${result.filePaths.join("\n")}\n`);
 }
 
 const selfPath = fileURLToPath(import.meta.url);
