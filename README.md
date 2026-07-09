@@ -319,6 +319,7 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
   "codexBypassSandbox": true,
   "codexGlobalArgs": ["--dangerously-bypass-approvals-and-sandbox"],
   "codexArgs": ["--json", "--skip-git-repo-check"],
+  "interactiveResponseTimeoutMs": 600000,
   "renderMarkdownImages": true,
   "chromePath": "/usr/bin/google-chrome",
   "markdownImageWidth": 920,
@@ -336,6 +337,8 @@ tmux attach -t codex-wx-task-...
 ```
 
 By default, task Codex sessions use `$HOME` as their working directory instead of being pinned to `~/codex/taskN`. Set `CODEX_WEIXIN_CODEX_CWD` or `"codexCwd"` to choose a different default working directory. `~/codex/taskN` is still used as the task data directory for inbound attachments and durable task metadata; `CODEX_WEIXIN_TASK_ROOT` can override that data root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
+
+For interactive replies, the router sends the heartbeat immediately, then waits until Codex shows a choice prompt, returns to an input prompt, or prints the final `Worked` status before rendering the Weixin image. The wait timeout defaults to 600000 ms; override it with `CODEX_WEIXIN_INTERACTIVE_RESPONSE_TIMEOUT_MS` or `"interactiveResponseTimeoutMs"` for longer tasks.
 
 By default, normal text/Markdown replies and completion notifications are rendered as terminal-style long PNG images before being sent to Weixin. Set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. `markdownImageMaxHeight` is the per-image output PNG height and defaults to `30000` for long-image mode; content beyond that limit is sent as multiple images instead of being clipped. If rendering or image upload fails, the sender falls back to the original text reply.
 

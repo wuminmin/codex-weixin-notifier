@@ -65,6 +65,7 @@ Environment variables override missing config values:
 - `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`
 - `CODEX_WEIXIN_CODEX_ARGS`
 - `CODEX_WEIXIN_RESTART_TASKS_ON_ROUTER_START`
+- `CODEX_WEIXIN_INTERACTIVE_RESPONSE_TIMEOUT_MS`
 - `CODEX_WEIXIN_MEDIA_ROOTS`
 - `CODEX_WEIXIN_MAX_MEDIA_BYTES`
 - `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES`
@@ -116,6 +117,7 @@ Important behavior:
 - `task tmux clean` only removes legacy per-run sessions named like `codex-wx-task-1-wxrun-...` or `codex-wx-task-1-wxr-...`; it does not remove `codex-wx-router` or fixed task sessions.
 - Router startup and ordinary message forwarding refresh stale task runner state. If a task is marked active but its tmux session or pid is gone, the stale runner fields are cleared and pending instructions are resumed instead of leaving future messages stuck in queue.
 - Ordinary task messages and attachment messages send a first text heartbeat before Codex processing. `task snap` sends `task N · 截图中` first. Immediate commands such as `list`, `task N`, `task close ...`, and alias commands do not send a separate heartbeat.
+- Interactive task replies wait for a choice prompt, the input prompt, or the final `Worked` status before rendering a Weixin image; default wait timeout is 600000 ms and can be overridden with `interactiveResponseTimeoutMs` or `CODEX_WEIXIN_INTERACTIVE_RESPONSE_TIMEOUT_MS`.
 - Child Codex runs can use `--dangerously-bypass-approvals-and-sandbox` by setting `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true`; existing tmux task sessions must be closed and re-entered before changed Codex arguments take effect.
 - When Codex shows an interactive `Question 1/1` prompt, Weixin should receive the full question text and numbered choices, including wrapped prompt and option lines from the terminal. Reply with `1`, `2`, etc. to submit that selection inside the task tmux session.
 - `task snap` is a static snapshot only; the user still controls the task by sending normal Weixin text replies.

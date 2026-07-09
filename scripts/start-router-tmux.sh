@@ -11,6 +11,7 @@ STATE_DIR="${CODEX_WEIXIN_STATE_DIR:-$HOME/.codex/weixin-notifier}"
 PID_FILE="$STATE_DIR/router.pid"
 QUIET=0
 RESTART=0
+ROUTER_ARGS=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -20,9 +21,12 @@ while [ "$#" -gt 0 ]; do
     --restart)
       RESTART=1
       ;;
+    --no-restart-tasks)
+      ROUTER_ARGS+=("--no-restart-tasks")
+      ;;
     --help|-h)
       cat <<EOF
-Usage: $0 [--quiet] [--restart]
+Usage: $0 [--quiet] [--restart] [--no-restart-tasks]
 
 Starts the Codex Weixin router in tmux.
 
@@ -30,6 +34,9 @@ Options:
   --quiet     Suppress status output.
   --restart   Stop the router first, then start it again. Active task sessions
               are restarted by the router on startup.
+  --no-restart-tasks
+              Pass through to the router so active task sessions are not
+              restarted on startup.
 EOF
       exit 0
       ;;
@@ -89,7 +96,7 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   exit 0
 fi
 
-if ! tmux new-session -d -s "$SESSION_NAME" -c "$PLUGIN_DIR" "$NODE_BIN" "$ROUTER_SCRIPT"; then
+if ! tmux new-session -d -s "$SESSION_NAME" -c "$PLUGIN_DIR" "$NODE_BIN" "$ROUTER_SCRIPT" "${ROUTER_ARGS[@]}"; then
   say "codex-wx-router: failed to start tmux session: $SESSION_NAME"
   exit 1
 fi

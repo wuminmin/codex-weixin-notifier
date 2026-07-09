@@ -41,7 +41,7 @@ const INBOUND_MEDIA_DIR = "inbox";
 const DEFAULT_INTERACTIVE_CAPTURE_DELAY_MS = 3000;
 const DEFAULT_INTERACTIVE_CAPTURE_LINES = 120;
 const DEFAULT_INTERACTIVE_READY_TIMEOUT_MS = 20000;
-const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 60000;
+const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_INTERACTIVE_RESPONSE_POLL_MS = 1000;
 const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
 const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
@@ -1711,8 +1711,7 @@ function answerInteractiveQuestion(task, text, config) {
   ].join("\n");
 }
 
-function captureAfterPrevious(sessionName, previousCleaned, config) {
-  const cleaned = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
+function outputAfterPrevious(cleaned, previousCleaned) {
   if (!previousCleaned) return cleaned;
   if (cleaned.startsWith(previousCleaned)) return cleaned.slice(previousCleaned.length).trim();
   const previousLines = previousCleaned.split("\n").filter(Boolean);
@@ -1724,18 +1723,48 @@ function captureAfterPrevious(sessionName, previousCleaned, config) {
   return cleaned;
 }
 
+function paneRawLines(text) {
+  return stripAnsi(text).split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean);
+}
+
+function paneTailLines(text, count = 12) {
+  return paneRawLines(text).slice(-count);
+}
+
+function paneHasInputPrompt(text) {
+  return paneTailLines(text).some((line) => /^›\s*/u.test(line.trim()) || /^>\s*$/u.test(line.trim()));
+}
+
+function paneLooksBusy(text) {
+  return paneTailLines(text).some((line) => /^Working\s*\(/iu.test(line.trim()));
+}
+
+function paneLooksDone(text) {
+  if (paneLooksBusy(text)) return false;
+  if (paneHasInputPrompt(text)) return true;
+  return paneTailLines(text).some((line) => /^Worked\b/iu.test(line.trim()));
+}
+
 function waitForInteractiveResponse(sessionName, previousCleaned, config) {
   const deadline = Date.now() + interactiveResponseTimeoutMs(config);
   let lastOutput = "";
   let stableCount = 0;
+  let fallbackStableCount = 0;
   while (Date.now() < deadline) {
-    const output = captureAfterPrevious(sessionName, previousCleaned, config);
-    if (output && output === lastOutput) {
+    const pane = captureTmuxPane(sessionName, config);
+    const cleaned = cleanInteractiveCapture(pane);
+    const output = outputAfterPrevious(cleaned, previousCleaned);
+    if (extractInteractiveQuestion(pane)) return output;
+    if (output && paneLooksDone(pane) && output === lastOutput) {
       stableCount += 1;
-      if (stableCount >= 2) return output;
+      if (stableCount >= 1) return output;
+    } else if (output && output === lastOutput && !paneLooksBusy(pane)) {
+      fallbackStableCount += 1;
+      if (fallbackStableCount >= 5) return output;
     } else if (output) {
       lastOutput = output;
       stableCount = 0;
+      fallbackStableCount = 0;
     }
     sleepSync(interactiveResponsePollMs(config));
   }
@@ -1743,8 +1772,8 @@ function waitForInteractiveResponse(sessionName, previousCleaned, config) {
 }
 
 function paneLooksReady(text) {
-  const cleaned = cleanInteractiveCapture(text);
-  return /(?:^|\n)›\s*/u.test(cleaned) || /(?:^|\n)>\s*$/u.test(cleaned) || /gpt-[\w.-]+.*·/u.test(stripAnsi(text));
+  const stripped = stripAnsi(text);
+  return paneHasInputPrompt(stripped) || /gpt-[\w.-]+.*·/u.test(stripped);
 }
 
 function waitForInteractiveReady(sessionName, config) {
