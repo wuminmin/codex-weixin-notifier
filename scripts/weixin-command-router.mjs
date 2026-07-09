@@ -245,6 +245,11 @@ function isTruthyConfig(value) {
   return /^(?:1|true|yes|on)$/iu.test(String(value || "").trim());
 }
 
+function isFalseyConfig(value) {
+  if (value === false) return true;
+  return /^(?:0|false|no|off)$/iu.test(String(value || "").trim());
+}
+
 function markdownImageRepliesEnabled(config) {
   return isTruthyConfig(config.renderMarkdownImages) || isTruthyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
 }
@@ -1388,6 +1393,15 @@ function killTmuxSession(sessionName) {
   return true;
 }
 
+function killTaskTmuxSessions(task) {
+  const sessionNames = new Set([task?.tmuxSession, makeTmuxSessionName(task || {})].filter(Boolean));
+  let killed = false;
+  for (const sessionName of sessionNames) {
+    killed = killTmuxSession(sessionName) || killed;
+  }
+  return killed;
+}
+
 function listTmuxSessions() {
   const result = spawnSync("tmux", ["list-sessions", "-F", "#{session_name}"], {
     encoding: "utf8",
@@ -1524,32 +1538,81 @@ function cleanedInteractiveLines(text, options = {}) {
   }).map((line) => line.replace(/^•\s*/u, ""));
 }
 
+function isInteractiveQuestionStart(line) {
+  return /Question\s+\d+\/\d+/iu.test(line) || /^Implement this plan\?/iu.test(line.trim());
+}
+
+function isInteractivePromptHint(line) {
+  return /tab to add notes|enter to submit|esc to interrupt|press enter to confirm|use (?:arrow )?keys|navigate|↑|↓/iu.test(line);
+}
+
+function cleanInteractivePromptLine(line) {
+  return String(line || "").trim().replace(/^›\s*/u, "").trim();
+}
+
+function questionStartText(line) {
+  const cleaned = cleanInteractivePromptLine(line);
+  const marker = cleaned.match(/^Question\s+\d+\/\d+\s*[:：-]?\s*(.*)$/iu);
+  if (marker) return marker[1].trim();
+  return /^Implement this plan\?/iu.test(cleaned) ? cleaned : "";
+}
+
+function optionLineMatch(line) {
+  return cleanInteractivePromptLine(line).match(/^([1-9]\d*)[.、)]\s+(.+)$/u);
+}
+
+function formatInteractiveOption(option) {
+  return `${option.index}. ${option.labelLines.join(" ").replace(/\s+/gu, " ").trim()}`;
+}
+
 function extractInteractiveQuestion(text) {
   const lines = cleanedInteractiveLines(text, { keepPromptLines: true });
-  const start = lines.findLastIndex((line) => {
-    return /Question\s+\d+\/\d+/iu.test(line) || /^Implement this plan\?/iu.test(line);
-  });
+  const start = lines.findLastIndex((line) => isInteractiveQuestionStart(line));
   if (start === -1) return null;
-  const block = lines.slice(start).map((line) => line.trim()).filter(Boolean);
-  const options = [];
-  for (const line of block) {
-    const match = line.match(/^[›\s]*([1-9])\.\s+(.+)$/u);
-    if (match) options.push({ index: Number(match[1]), label: match[2].trim() });
+
+  const block = [];
+  for (const line of lines.slice(start)) {
+    if (!line.trim()) continue;
+    if (block.length > 0 && isInteractiveQuestionStart(line)) break;
+    if (isInteractivePromptHint(line)) break;
+    block.push(line);
   }
+
+  const questionLines = [];
+  const options = [];
+  let currentOption = null;
+  for (const line of block) {
+    const match = optionLineMatch(line);
+    if (match) {
+      currentOption = { index: Number(match[1]), labelLines: [match[2].trim()] };
+      options.push(currentOption);
+      continue;
+    }
+
+    const lineText = cleanInteractivePromptLine(line);
+    if (!lineText) continue;
+
+    if (options.length === 0) {
+      const startText = isInteractiveQuestionStart(line) ? questionStartText(line) : lineText;
+      if (startText) questionLines.push(startText);
+      continue;
+    }
+
+    if (currentOption) currentOption.labelLines.push(lineText);
+  }
+
   if (options.length === 0) return null;
-  const questionLine = block.find((line, index) => {
-    if (/^Implement this plan\?/iu.test(line)) return true;
-    return index > 0
-      && !/^[›\s]*[1-9]\./u.test(line)
-      && !/tab to add notes|enter to submit|esc to interrupt|press enter to confirm/iu.test(line);
-  }) || "";
+  const questionText = questionLines.join("\n").trim();
   return {
     text: [
       "Codex 正在等待选择。请直接回复数字：",
-      questionLine ? `问题: ${questionLine}` : null,
-      ...options.map((option) => `${option.index}. ${option.label.replace(/\s+/gu, " ")}`),
+      questionText ? `问题:\n${questionText}` : null,
+      ...options.map(formatInteractiveOption),
     ].filter(Boolean).join("\n"),
-    options,
+    options: options.map((option) => ({
+      index: option.index,
+      label: option.labelLines.join(" ").replace(/\s+/gu, " ").trim(),
+    })),
   };
 }
 
@@ -2397,6 +2460,76 @@ function startInstructionForTask(task, instructionEntry, config) {
   });
 }
 
+function hasTaskTmuxSession(task) {
+  const sessionNames = new Set([task?.tmuxSession, makeTmuxSessionName(task || {})].filter(Boolean));
+  for (const sessionName of sessionNames) {
+    if (tmuxHasSession(sessionName)) return true;
+  }
+  return false;
+}
+
+function shouldRestartTaskOnRouterStart(task) {
+  if (!task || task.status === "closed") return false;
+  if (task.status === "queued") return false;
+  return task.status === "running" || task.status === "starting" || hasTaskTmuxSession(task);
+}
+
+function restartTasksOnRouterStartEnabled(config, args = {}) {
+  if (args["no-restart-tasks"] === "true") return false;
+  const configured = valueFrom(
+    args["restart-tasks"],
+    process.env.CODEX_WEIXIN_RESTART_TASKS_ON_ROUTER_START,
+    config.restartTasksOnRouterStart,
+  );
+  return configured === undefined ? true : !isFalseyConfig(configured);
+}
+
+function restartActiveTaskSessionsOnRouterStart(config, args = {}) {
+  if (!restartTasksOnRouterStartEnabled(config, args)) return [];
+  if (config.dryRun) return [];
+  if (selectedRunner(config) !== "interactive") return [];
+
+  const restarted = [];
+  const state = loadTasks();
+  const candidates = state.tasks.filter(shouldRestartTaskOnRouterStart);
+  for (const task of candidates) {
+    const restartedAt = new Date().toISOString();
+    try {
+      const killed = killTaskTmuxSessions(task);
+      const prepared = updateTask(task.id, (current) => ({
+        ...current,
+        status: "starting",
+        runner: "interactive",
+        tmuxSession: "",
+        tmuxAttach: "",
+        tmuxPanePid: "",
+        pid: "",
+        runId: "",
+        signal: "router-restart",
+        tmuxClosed: killed,
+        restartedAt,
+        startedAt: restartedAt,
+        updatedAt: restartedAt,
+      }));
+      const session = ensureInteractiveSession(prepared || task, config);
+      restarted.push({ id: String(task.id), sessionName: session.sessionName, killed });
+    } catch (error) {
+      appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] restart task ${task.id} failed: ${error.stack || error.message}\n`);
+      updateTask(task.id, (current) => ({
+        ...current,
+        status: "unknown",
+        error: error.message,
+        tmuxSession: "",
+        tmuxAttach: "",
+        tmuxPanePid: "",
+        pid: "",
+        updatedAt: new Date().toISOString(),
+      }));
+    }
+  }
+  return restarted;
+}
+
 function recoverStaleTaskQueues(config) {
   const recovered = [];
   const state = loadTasks();
@@ -2595,6 +2728,10 @@ async function main() {
   if (args.once === "true") {
     await runOnce(args, config);
     return;
+  }
+  const restarted = restartActiveTaskSessionsOnRouterStart(config, args);
+  if (restarted.length > 0) {
+    process.stdout.write(`Restarted task sessions: ${restarted.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
   }
   const recovered = recoverStaleTaskQueues(config);
   if (recovered.length > 0) {

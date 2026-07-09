@@ -17,7 +17,7 @@ The plugin separates the completion event from the Weixin transport:
 - `scripts/weixin-command-router.mjs` sends a small text heartbeat such as `task N · 处理中` before processing ordinary task messages, while immediate commands such as `list` and `task close ...` reply normally.
 - `scripts/weixin-command-router.mjs` starts interactive tasks with `codex --no-alt-screen -C <codexCwd>` plus the configured Codex global args, so Weixin can drive native CLI slash commands such as `/plan` and `/goal`.
 - `scripts/weixin-command-router.mjs` maps Weixin `plan ...` to `/plan ...`, and `goal ...` / `goal status` / `goal pause` / `goal resume` / `goal clear` to the native `/goal` command family.
-- `scripts/weixin-command-router.mjs` detects Codex interactive `Question 1/1` choice prompts in tmux output, sends the numbered options back to Weixin, and treats the next numeric Weixin reply as the selected option.
+- `scripts/weixin-command-router.mjs` detects Codex interactive `Question 1/1` choice prompts in tmux output, sends the full question text and numbered options back to Weixin, and treats the next numeric Weixin reply as the selected option.
 - `scripts/weixin-command-router.mjs` accepts inbound Weixin images and files for the current task; files are saved under the task data directory, normally `~/codex/taskN/inbox/`, and images are passed to Codex with `--image` when the interactive session starts, while other files are referenced by local path in the prompt.
 - `scripts/weixin-command-router.mjs` also sends local images and file attachments when a Codex task emits a `MEDIA:/absolute/path` directive on its own line.
 - `scripts/weixin-command-router.mjs` can render outbound Markdown/text replies as terminal-style PNG images when `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` is enabled, then send those PNGs through the existing media path.
@@ -64,6 +64,7 @@ Environment variables override missing config values:
 - `CODEX_WEIXIN_CODEX_SANDBOX`
 - `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`
 - `CODEX_WEIXIN_CODEX_ARGS`
+- `CODEX_WEIXIN_RESTART_TASKS_ON_ROUTER_START`
 - `CODEX_WEIXIN_MEDIA_ROOTS`
 - `CODEX_WEIXIN_MAX_MEDIA_BYTES`
 - `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES`
@@ -87,7 +88,7 @@ Use the fixed tmux startup wrapper for WSL startup or Windows Task Scheduler:
 /path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
 ```
 
-It is idempotent and only starts `codex-wx-router` when that tmux session is missing.
+It is idempotent and only starts `codex-wx-router` when that tmux session is missing. Use `--restart` to stop and relaunch the router; active task sessions are restarted by the router on startup.
 
 Supported inbound Weixin commands:
 
@@ -111,11 +112,12 @@ Important behavior:
 - `task 0` does not create other tasks. New tasks are created only by explicit `task N` commands.
 - `task reset ...` refuses running, starting, or queued tasks; close them first with `task close ...`.
 - interactive tmux sessions are fixed by task id, such as `codex-wx-task-0` and `codex-wx-task-1`; they stay open until `task close N` or the Codex CLI exits.
+- Router startup restarts active interactive task sessions by default so tmux panes pick up changed router/Codex arguments after every router restart. Set `CODEX_WEIXIN_RESTART_TASKS_ON_ROUTER_START=0`, `restartTasksOnRouterStart: false`, or pass `--no-restart-tasks` to the router to disable it.
 - `task tmux clean` only removes legacy per-run sessions named like `codex-wx-task-1-wxrun-...` or `codex-wx-task-1-wxr-...`; it does not remove `codex-wx-router` or fixed task sessions.
 - Router startup and ordinary message forwarding refresh stale task runner state. If a task is marked active but its tmux session or pid is gone, the stale runner fields are cleared and pending instructions are resumed instead of leaving future messages stuck in queue.
 - Ordinary task messages and attachment messages send a first text heartbeat before Codex processing. `task snap` sends `task N · 截图中` first. Immediate commands such as `list`, `task N`, `task close ...`, and alias commands do not send a separate heartbeat.
 - Child Codex runs can use `--dangerously-bypass-approvals-and-sandbox` by setting `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true`; existing tmux task sessions must be closed and re-entered before changed Codex arguments take effect.
-- When Codex shows an interactive `Question 1/1` prompt, Weixin should receive the question and numbered choices. Reply with `1`, `2`, etc. to submit that selection inside the task tmux session.
+- When Codex shows an interactive `Question 1/1` prompt, Weixin should receive the full question text and numbered choices, including wrapped prompt and option lines from the terminal. Reply with `1`, `2`, etc. to submit that selection inside the task tmux session.
 - `task snap` is a static snapshot only; the user still controls the task by sending normal Weixin text replies.
 - Normal replies and completion notifications render as PNG images only when explicitly enabled with `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1`. The renderer uses Chrome from `chromePath`, `CODEX_WEIXIN_CHROME_PATH`, or common system paths such as `/usr/bin/google-chrome`, with optional width/character limits and a per-image output PNG height limit; longer content is sent as multiple images instead of being clipped. If rendering or media upload fails, the sender falls back to the original text.
 - The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.

@@ -58,7 +58,7 @@ First-run journey:
 2. Send `bind codex` to the paired Weixin bot, then run `bind-recipient.mjs` in the terminal. This captures the recipient and `contextToken` required by iLink sends.
 3. Start the router with `start-router-tmux.sh`. The command is idempotent and should print `codex-wx-router: started` or `already running`.
 4. In Weixin, send `list` to confirm the bot is alive, then send the first real request, for example `summarize this repository`. Ordinary text is forwarded to the current task, normally `task 0`.
-5. If Codex asks a `Question 1/1` multiple-choice prompt, Weixin receives the numbered options. Reply with `1`, `2`, etc. to answer it.
+5. If Codex asks a `Question 1/1` multiple-choice prompt, Weixin receives the full question text and numbered options. Reply with `1`, `2`, etc. to answer it.
 
 ## Architecture
 
@@ -153,10 +153,14 @@ Or start it in the fixed tmux router session:
 /path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
 ```
 
-The start script is idempotent: it starts `codex-wx-router` only when that tmux session is missing. It is safe to call from PowerShell, WSL login startup, or Windows Task Scheduler:
+The start script is idempotent: it starts `codex-wx-router` only when that tmux session is missing. Use `--restart` when you want to stop and relaunch the router; active task sessions are restarted by the router on startup. It is safe to call from PowerShell, WSL login startup, or Windows Task Scheduler:
 
 ```powershell
 wsl.exe -- bash -lc "/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh"
+```
+
+```bash
+/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh --restart
 ```
 
 The router stores state in:
@@ -207,7 +211,7 @@ ls
 
 `task 0` is the default Codex assistant and always exists. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
-By default, each task is a long-running interactive Codex session in a fixed tmux session. The router starts task `N` with this shape:
+By default, each task is a long-running interactive Codex session in a fixed tmux session. When the router starts, it restarts all active task sessions so task tmux panes pick up new router/Codex arguments after a router restart. Set `CODEX_WEIXIN_RESTART_TASKS_ON_ROUTER_START=0`, `"restartTasksOnRouterStart": false`, or pass `--no-restart-tasks` to the router to disable that startup restart. The router starts task `N` with this shape:
 
 ```bash
 codex --no-alt-screen \
@@ -217,7 +221,7 @@ codex --no-alt-screen \
 
 When the router receives an ordinary task message, it first sends a small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and captures recent terminal output back to Weixin. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
 
-When Codex enters an interactive `Question 1/1` choice prompt, the router formats the question and numbered options for Weixin. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
+When Codex enters an interactive `Question 1/1` choice prompt, the router formats the full question text and numbered options for Weixin, including wrapped prompt and option lines from the terminal. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
 
 Send `task snap` or `task screenshot` to render the current task's tmux pane as one or more terminal-style PNG images and send them back to Weixin. This is a static snapshot; continue to control Codex by sending normal text replies.
 

@@ -10,10 +10,36 @@ NODE_BIN="${CODEX_WEIXIN_NODE:-node}"
 STATE_DIR="${CODEX_WEIXIN_STATE_DIR:-$HOME/.codex/weixin-notifier}"
 PID_FILE="$STATE_DIR/router.pid"
 QUIET=0
+RESTART=0
 
-if [ "${1:-}" = "--quiet" ]; then
-  QUIET=1
-fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --quiet)
+      QUIET=1
+      ;;
+    --restart)
+      RESTART=1
+      ;;
+    --help|-h)
+      cat <<EOF
+Usage: $0 [--quiet] [--restart]
+
+Starts the Codex Weixin router in tmux.
+
+Options:
+  --quiet     Suppress status output.
+  --restart   Stop the router first, then start it again. Active task sessions
+              are restarted by the router on startup.
+EOF
+      exit 0
+      ;;
+    *)
+      printf 'codex-wx-router: unknown option: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 say() {
   if [ "$QUIET" -eq 0 ]; then
@@ -25,7 +51,7 @@ write_pid() {
   local pid="$1"
   if [ -n "$pid" ]; then
     mkdir -p "$STATE_DIR" 2>/dev/null || true
-    printf '%s\n' "$pid" >"$PID_FILE" 2>/dev/null || true
+    (printf '%s\n' "$pid" >"$PID_FILE") 2>/dev/null || true
   fi
 }
 
@@ -47,6 +73,13 @@ fi
 if [ ! -f "$PLUGIN_DIR/$ROUTER_SCRIPT" ]; then
   say "codex-wx-router: router script not found: $PLUGIN_DIR/$ROUTER_SCRIPT"
   exit 1
+fi
+
+if [ "$RESTART" -eq 1 ] && tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if ! tmux kill-session -t "$SESSION_NAME"; then
+    say "codex-wx-router: failed to stop tmux session: $SESSION_NAME"
+    exit 1
+  fi
 fi
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
