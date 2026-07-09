@@ -35,7 +35,7 @@ Installer overrides:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
-  | CODEX_WEIXIN_REF=v0.1.1 bash
+  | CODEX_WEIXIN_REF=v0.1.2 bash
 
 curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
   | CODEX_WEIXIN_INSTALL_ROOT="$HOME/.local/share/codex-weixin-notifier" bash
@@ -419,7 +419,7 @@ To publish this as a one-line install project:
 2. Confirm `DEFAULT_REPO_URL` in `install.sh` points at the public repository.
 3. Confirm the included MIT `LICENSE` is the license you want, or replace it before inviting outside users.
 4. Commit and push `install.sh` and this README update.
-5. Tag a stable release, for example `git tag v0.1.1 && git push origin v0.1.1`.
+5. Tag a stable release, for example `git tag v0.1.2 && git push origin v0.1.2`.
 6. Test from a clean shell:
 
 ```bash
@@ -433,8 +433,8 @@ curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main
 For a release-pinned install command, publish:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/v0.1.1/install.sh \
-  | CODEX_WEIXIN_REF=v0.1.1 bash
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/v0.1.2/install.sh \
+  | CODEX_WEIXIN_REF=v0.1.2 bash
 ```
 
 ## License
