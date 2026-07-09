@@ -16,6 +16,15 @@ Install or update with one command:
 curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh | bash
 ```
 
+If `raw.githubusercontent.com` is rate-limited or blocked, use the GitHub API raw endpoint instead:
+
+```bash
+curl -fsSL \
+  -H 'Accept: application/vnd.github.raw' \
+  'https://api.github.com/repos/wuminmin/codex-weixin-notifier/contents/install.sh?ref=main' \
+  | bash
+```
+
 The installer:
 
 - Clones this repository into `~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier`.
@@ -434,6 +443,15 @@ For a release-pinned install command, publish:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/v0.1.2/install.sh \
+  | CODEX_WEIXIN_REF=v0.1.2 bash
+```
+
+If GitHub raw returns `429`, use the API raw endpoint:
+
+```bash
+curl -fsSL \
+  -H 'Accept: application/vnd.github.raw' \
+  'https://api.github.com/repos/wuminmin/codex-weixin-notifier/contents/install.sh?ref=v0.1.2' \
   | CODEX_WEIXIN_REF=v0.1.2 bash
 ```
 
