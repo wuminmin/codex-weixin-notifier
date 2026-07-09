@@ -13,9 +13,9 @@
   "codexCwd": "~",
   "codexArgs": ["--json", "--skip-git-repo-check", "--ask-for-approval", "never"],
   "restartTasksOnRouterStart": true,
-  "renderMarkdownImages": false,
+  "renderMarkdownImages": true,
   "chromePath": "/usr/bin/google-chrome",
   "markdownImageWidth": 920,
   "markdownImageMaxChars": 120000,
-  "markdownImageMaxHeight": 6000
+  "markdownImageMaxHeight": 30000
 }

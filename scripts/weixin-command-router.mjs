@@ -45,7 +45,7 @@ const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 60000;
 const DEFAULT_INTERACTIVE_RESPONSE_POLL_MS = 1000;
 const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
 const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
-const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 6000;
+const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 30000;
 let runtimeConfig = {};
 
 const EXTENSION_TO_MIME = {
@@ -240,18 +240,19 @@ function isDryRun(args, config) {
   return args["dry-run"] === "true" || process.env.CODEX_WEIXIN_DRY_RUN === "1" || config.dryRun === true;
 }
 
-function isTruthyConfig(value) {
-  if (value === true) return true;
-  return /^(?:1|true|yes|on)$/iu.test(String(value || "").trim());
-}
-
 function isFalseyConfig(value) {
   if (value === false) return true;
   return /^(?:0|false|no|off)$/iu.test(String(value || "").trim());
 }
 
 function markdownImageRepliesEnabled(config) {
-  return isTruthyConfig(config.renderMarkdownImages) || isTruthyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
+  if (process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES !== undefined) {
+    return !isFalseyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
+  }
+  if (config.renderMarkdownImages !== undefined && config.renderMarkdownImages !== null && config.renderMarkdownImages !== "") {
+    return !isFalseyConfig(config.renderMarkdownImages);
+  }
+  return true;
 }
 
 function markdownImageNumber(value, fallback) {

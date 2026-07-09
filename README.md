@@ -63,7 +63,7 @@ First-run journey:
 ## Architecture
 
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
-- `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint. When Markdown image rendering is enabled, completion notifications are sent as one or more terminal-style PNG images.
+- `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint. Completion notifications are rendered as terminal-style long PNG images by default.
 - `scripts/weixin-command-router.mjs` long-polls inbound Weixin messages, keeps a numbered task list, switches the current task with `task N`, and forwards ordinary text to the selected Codex task.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
@@ -122,7 +122,7 @@ node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
   --summary "This is a formatting-only test."
 ```
 
-When Markdown image rendering is enabled, the dry run prints the generated image path or paths instead of uploading:
+By default, the dry run prints the generated long-image path or paths instead of uploading:
 
 ```text
 [dry-run media] image /tmp/codex-weixin-md-.../reply-01.png ...
@@ -314,7 +314,7 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
   "chromePath": "/usr/bin/google-chrome",
   "markdownImageWidth": 920,
   "markdownImageMaxChars": 120000,
-  "markdownImageMaxHeight": 6000
+  "markdownImageMaxHeight": 30000
 }
 ```
 
@@ -328,7 +328,7 @@ tmux attach -t codex-wx-task-...
 
 By default, task Codex sessions use `$HOME` as their working directory instead of being pinned to `~/codex/taskN`. Set `CODEX_WEIXIN_CODEX_CWD` or `"codexCwd"` to choose a different default working directory. `~/codex/taskN` is still used as the task data directory for inbound attachments and durable task metadata; `CODEX_WEIXIN_TASK_ROOT` can override that data root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
 
-Set `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` to render normal text/Markdown replies and completion notifications as terminal-style PNG images before sending them to Weixin. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. `markdownImageMaxHeight` is the per-image output PNG height; longer content is sent as multiple images instead of being clipped. If rendering or image upload fails, the sender falls back to the original text reply.
+By default, normal text/Markdown replies and completion notifications are rendered as terminal-style long PNG images before being sent to Weixin. Set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. `markdownImageMaxHeight` is the per-image output PNG height and defaults to `30000` for long-image mode; content beyond that limit is sent as multiple images instead of being clipped. If rendering or image upload fails, the sender falls back to the original text reply.
 
 ## Weixin Attachments
 

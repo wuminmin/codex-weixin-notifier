@@ -12,7 +12,7 @@ Use this skill when the user wants Codex to pair Weixin by QR code, notify Weixi
 The plugin separates the completion event from the Weixin transport:
 
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
-- `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks. It can render completion notifications as one or more terminal-style PNG images when `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` is enabled.
+- `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks. It renders completion notifications as terminal-style long PNG images by default; set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies.
 - `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N`, and forwards ordinary text to the selected task's interactive tmux Codex session.
 - `scripts/weixin-command-router.mjs` sends a small text heartbeat such as `task N · 处理中` before processing ordinary task messages, while immediate commands such as `list` and `task close ...` reply normally.
 - `scripts/weixin-command-router.mjs` starts interactive tasks with `codex --no-alt-screen -C <codexCwd>` plus the configured Codex global args, so Weixin can drive native CLI slash commands such as `/plan` and `/goal`.
@@ -20,7 +20,7 @@ The plugin separates the completion event from the Weixin transport:
 - `scripts/weixin-command-router.mjs` detects Codex interactive `Question 1/1` choice prompts in tmux output, sends the full question text and numbered options back to Weixin, and treats the next numeric Weixin reply as the selected option.
 - `scripts/weixin-command-router.mjs` accepts inbound Weixin images and files for the current task; files are saved under the task data directory, normally `~/codex/taskN/inbox/`, and images are passed to Codex with `--image` when the interactive session starts, while other files are referenced by local path in the prompt.
 - `scripts/weixin-command-router.mjs` also sends local images and file attachments when a Codex task emits a `MEDIA:/absolute/path` directive on its own line.
-- `scripts/weixin-command-router.mjs` can render outbound Markdown/text replies as terminal-style PNG images when `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1` is enabled, then send those PNGs through the existing media path.
+- `scripts/weixin-command-router.mjs` renders outbound Markdown/text replies as terminal-style long PNG images by default, then sends those PNGs through the existing media path.
 - `task snap` / `task screenshot` renders the current task's tmux pane as one or more static PNG images and sends them to Weixin.
 - Each notification carries a `sessionId`, `source`, `workspace`, `task`, `status`, and completion time.
 - Multiple Codex processes are separated by an explicit session id when available; otherwise the sender derives a short id from process and workspace context.
@@ -119,7 +119,7 @@ Important behavior:
 - Child Codex runs can use `--dangerously-bypass-approvals-and-sandbox` by setting `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` / `codexBypassSandbox: true`; existing tmux task sessions must be closed and re-entered before changed Codex arguments take effect.
 - When Codex shows an interactive `Question 1/1` prompt, Weixin should receive the full question text and numbered choices, including wrapped prompt and option lines from the terminal. Reply with `1`, `2`, etc. to submit that selection inside the task tmux session.
 - `task snap` is a static snapshot only; the user still controls the task by sending normal Weixin text replies.
-- Normal replies and completion notifications render as PNG images only when explicitly enabled with `renderMarkdownImages` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=1`. The renderer uses Chrome from `chromePath`, `CODEX_WEIXIN_CHROME_PATH`, or common system paths such as `/usr/bin/google-chrome`, with optional width/character limits and a per-image output PNG height limit; longer content is sent as multiple images instead of being clipped. If rendering or media upload fails, the sender falls back to the original text.
+- Normal replies and completion notifications render as long PNG images by default. Set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text. The renderer uses Chrome from `chromePath`, `CODEX_WEIXIN_CHROME_PATH`, or common system paths such as `/usr/bin/google-chrome`, with optional width/character limits and a per-image output PNG height limit; longer content is sent as multiple images instead of being clipped. If rendering or media upload fails, the sender falls back to the original text.
 - The router does not interpret natural language. It only handles exact `list`, `task N`, `task close ...`, and alias commands, the `pwd`/`ls` WSL command whitelist, tracks the current task, starts/closes Codex processes, and forwards messages.
 - Weixin replies are prefixed with `task N:` so the user can see which Codex process answered.
 - Weixin image/file messages go to the current task. Images use Codex `--image`; ordinary files are referenced by saved local path because Codex CLI does not provide a generic `--file` option.

@@ -10,7 +10,7 @@ import { chromium } from "playwright-core";
 
 const DEFAULT_WIDTH = 920;
 const DEFAULT_MAX_CHARS = 120_000;
-const DEFAULT_MAX_HEIGHT = 6000;
+const DEFAULT_MAX_HEIGHT = 30000;
 const DEFAULT_TITLE = "Codex Weixin";
 const DEFAULT_DEVICE_SCALE_FACTOR = 2;
 const MIN_IMAGE_HEIGHT = 120;

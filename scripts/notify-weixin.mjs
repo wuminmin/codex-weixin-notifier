@@ -21,7 +21,7 @@ const MEDIA_TYPE_IMAGE = 1;
 const DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
 const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
-const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 6000;
+const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 30000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 
 function expandHome(value) {
@@ -78,13 +78,19 @@ function valueFrom(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
 }
 
-function isTruthyConfig(value) {
-  if (value === true) return true;
-  return /^(?:1|true|yes|on)$/iu.test(String(value || "").trim());
+function isFalseyConfig(value) {
+  if (value === false) return true;
+  return /^(?:0|false|no|off)$/iu.test(String(value || "").trim());
 }
 
 function markdownImageRepliesEnabled(config) {
-  return isTruthyConfig(config.renderMarkdownImages) || isTruthyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
+  if (process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES !== undefined) {
+    return !isFalseyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
+  }
+  if (config.renderMarkdownImages !== undefined && config.renderMarkdownImages !== null && config.renderMarkdownImages !== "") {
+    return !isFalseyConfig(config.renderMarkdownImages);
+  }
+  return true;
 }
 
 function positiveInteger(value, fallback) {
