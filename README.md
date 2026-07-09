@@ -228,7 +228,7 @@ codex --no-alt-screen \
   -C "${CODEX_WEIXIN_CODEX_CWD:-$HOME}"
 ```
 
-When the router receives an ordinary task message, it first sends a small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and captures recent terminal output back to Weixin. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
+When the router receives an ordinary task message, it first sends a small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and starts a background watcher. The watcher keeps the router free for other Weixin commands, sends choice prompts immediately, and sends the final rendered image after Codex prints `Worked` or returns to the input prompt. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
 
 When Codex enters an interactive `Question 1/1` choice prompt, the router formats the full question text and numbered options for Weixin, including wrapped prompt and option lines from the terminal. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
 
@@ -319,7 +319,8 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
   "codexBypassSandbox": true,
   "codexGlobalArgs": ["--dangerously-bypass-approvals-and-sandbox"],
   "codexArgs": ["--json", "--skip-git-repo-check"],
-  "interactiveResponseTimeoutMs": 600000,
+  "interactiveResponseTimeoutMs": 21600000,
+  "interactiveWatchStatusIntervalMs": 1800000,
   "renderMarkdownImages": true,
   "chromePath": "/usr/bin/google-chrome",
   "markdownImageWidth": 920,
@@ -338,7 +339,7 @@ tmux attach -t codex-wx-task-...
 
 By default, task Codex sessions use `$HOME` as their working directory instead of being pinned to `~/codex/taskN`. Set `CODEX_WEIXIN_CODEX_CWD` or `"codexCwd"` to choose a different default working directory. `~/codex/taskN` is still used as the task data directory for inbound attachments and durable task metadata; `CODEX_WEIXIN_TASK_ROOT` can override that data root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
 
-For interactive replies, the router sends the heartbeat immediately, then waits until Codex shows a choice prompt, returns to an input prompt, or prints the final `Worked` status before rendering the Weixin image. The wait timeout defaults to 600000 ms; override it with `CODEX_WEIXIN_INTERACTIVE_RESPONSE_TIMEOUT_MS` or `"interactiveResponseTimeoutMs"` for longer tasks.
+For interactive replies, the router sends the heartbeat immediately, then tracks the tmux pane in the background until Codex shows a choice prompt, returns to an input prompt, or prints the final `Worked` status before rendering the Weixin image. Watcher state is stored in task metadata so a router restart with `--no-restart-tasks` can resume waiting for the same tmux task. `interactiveResponseTimeoutMs` is only an abnormal watcher timeout and defaults to 21600000 ms. Override it with `CODEX_WEIXIN_INTERACTIVE_RESPONSE_TIMEOUT_MS` or `"interactiveResponseTimeoutMs"`. Long-running tasks send a light status text every 1800000 ms by default; override with `CODEX_WEIXIN_INTERACTIVE_WATCH_STATUS_INTERVAL_MS` or `"interactiveWatchStatusIntervalMs"`, or set it to `0` to disable status pings.
 
 By default, normal text/Markdown replies and completion notifications are rendered as terminal-style long PNG images before being sent to Weixin. Set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. `markdownImageMaxHeight` is the per-image output PNG height and defaults to `30000` for long-image mode; content beyond that limit is sent as multiple images instead of being clipped. If rendering or image upload fails, the sender falls back to the original text reply.
 

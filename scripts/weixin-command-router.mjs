@@ -41,12 +41,14 @@ const INBOUND_MEDIA_DIR = "inbox";
 const DEFAULT_INTERACTIVE_CAPTURE_DELAY_MS = 3000;
 const DEFAULT_INTERACTIVE_CAPTURE_LINES = 120;
 const DEFAULT_INTERACTIVE_READY_TIMEOUT_MS = 20000;
-const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_INTERACTIVE_RESPONSE_POLL_MS = 1000;
+const DEFAULT_INTERACTIVE_WATCH_STATUS_INTERVAL_MS = 30 * 60 * 1000;
 const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
 const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
 const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 30000;
 let runtimeConfig = {};
+const interactiveWatchers = new Map();
 
 const EXTENSION_TO_MIME = {
   ".bmp": "image/bmp",
@@ -1488,6 +1490,28 @@ function interactiveResponsePollMs(config) {
   return Number(valueFrom(config.interactiveResponsePollMs, process.env.CODEX_WEIXIN_INTERACTIVE_RESPONSE_POLL_MS, DEFAULT_INTERACTIVE_RESPONSE_POLL_MS));
 }
 
+function interactiveWatchStatusIntervalMs(config) {
+  return Number(valueFrom(
+    config.interactiveWatchStatusIntervalMs,
+    process.env.CODEX_WEIXIN_INTERACTIVE_WATCH_STATUS_INTERVAL_MS,
+    DEFAULT_INTERACTIVE_WATCH_STATUS_INTERVAL_MS,
+  ));
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 function captureTmuxPane(sessionName, config) {
   const lines = Math.max(20, interactiveCaptureLines(config));
   const result = spawnSync("tmux", ["capture-pane", "-pt", sessionName, "-S", `-${lines}`], {
@@ -1683,7 +1707,7 @@ function sendInteractiveChoice(sessionName, choice) {
   }
 }
 
-function answerInteractiveQuestion(task, text, config) {
+function answerInteractiveQuestion(task, text, config, options = {}) {
   const sessionName = makeTmuxSessionName(task);
   const question = currentInteractiveQuestion(sessionName, config);
   if (!question) return null;
@@ -1700,14 +1724,17 @@ function answerInteractiveQuestion(task, text, config) {
 
   const before = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
   sendInteractiveChoice(sessionName, choice);
-  sleepSync(interactiveCaptureDelayMs(config));
-  const output = waitForInteractiveResponse(sessionName, before, config);
-  const nextQuestion = currentInteractiveQuestion(sessionName, config);
+  startInteractiveWatcher({
+    task,
+    sessionName,
+    previousCleaned: before,
+    config,
+    replyConfig: options.replyConfig || config,
+    args: options.args || {},
+  });
   return [
-    taskHeader(task.id, `已选择 ${choice}`),
+    taskHeader(task.id, `已选择 ${choice}，继续处理中`),
     `会话: ${sessionName}`,
-    "",
-    nextQuestion ? nextQuestion.text : compactLines(output || "已提交选择，Codex 继续处理中。", 3000),
   ].join("\n");
 }
 
@@ -1745,35 +1772,171 @@ function paneLooksDone(text) {
   return paneTailLines(text).some((line) => /^Worked\b/iu.test(line.trim()));
 }
 
-function waitForInteractiveResponse(sessionName, previousCleaned, config) {
-  const deadline = Date.now() + interactiveResponseTimeoutMs(config);
-  let lastOutput = "";
-  let stableCount = 0;
-  let fallbackStableCount = 0;
-  while (Date.now() < deadline) {
-    const pane = captureTmuxPane(sessionName, config);
-    const cleaned = cleanInteractiveCapture(pane);
-    const output = outputAfterPrevious(cleaned, previousCleaned);
-    if (extractInteractiveQuestion(pane)) return output;
-    if (output && paneLooksDone(pane) && output === lastOutput) {
-      stableCount += 1;
-      if (stableCount >= 1) return output;
-    } else if (output && output === lastOutput && !paneLooksBusy(pane)) {
-      fallbackStableCount += 1;
-      if (fallbackStableCount >= 5) return output;
-    } else if (output) {
-      lastOutput = output;
-      stableCount = 0;
-      fallbackStableCount = 0;
-    }
-    sleepSync(interactiveResponsePollMs(config));
-  }
-  return lastOutput;
-}
-
 function paneLooksReady(text) {
   const stripped = stripAnsi(text);
   return paneHasInputPrompt(stripped) || /gpt-[\w.-]+.*·/u.test(stripped);
+}
+
+function interactiveWatcherReply(taskId, sessionName, status, output = "", elapsedMs = 0) {
+  return [
+    taskHeader(taskId, status),
+    sessionName ? `会话: ${sessionName}` : null,
+    elapsedMs ? `耗时: ${formatDuration(elapsedMs)}` : null,
+    "",
+    output ? compactLines(output, 8000) : null,
+  ].filter((line) => line !== null).join("\n");
+}
+
+async function sendWatcherText(text, config, args = {}) {
+  try {
+    await sendText(text, config, args);
+  } catch (error) {
+    appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] watcher text send failed: ${error.stack || error.message}\n`);
+  }
+}
+
+async function sendWatcherTextWithMedia(text, config, args = {}) {
+  try {
+    await sendTextWithMedia(text, config, args);
+  } catch (error) {
+    appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] watcher reply send failed: ${error.stack || error.message}\n`);
+  }
+}
+
+function stopInteractiveWatcher(taskId) {
+  const key = String(taskId);
+  const existing = interactiveWatchers.get(key);
+  if (existing) existing.cancelled = true;
+  interactiveWatchers.delete(key);
+}
+
+function persistInteractiveWatcher(taskId, watcher, replyConfig, previousCleaned) {
+  updateTask(taskId, (current) => ({
+    ...current,
+    interactiveWatch: {
+      sessionName: watcher.sessionName,
+      previousCleaned,
+      toUser: replyConfig?.toUser || "",
+      contextToken: replyConfig?.contextToken || "",
+      startedAt: new Date(watcher.startedAt).toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    updatedAt: new Date().toISOString(),
+  }));
+}
+
+function clearPersistedInteractiveWatcher(taskId) {
+  updateTask(taskId, (current) => ({
+    ...current,
+    interactiveWatch: null,
+    updatedAt: new Date().toISOString(),
+  }));
+}
+
+function startInteractiveWatcher({ task, sessionName, previousCleaned, config, replyConfig, args = {}, startedAt = Date.now() }) {
+  const taskId = String(task.id);
+  stopInteractiveWatcher(taskId);
+  const watcher = {
+    taskId,
+    sessionName,
+    cancelled: false,
+    startedAt,
+    lastStatusAt: Date.now(),
+  };
+  interactiveWatchers.set(taskId, watcher);
+  persistInteractiveWatcher(taskId, watcher, replyConfig || config, previousCleaned);
+  runInteractiveWatcher(watcher, {
+    task,
+    sessionName,
+    previousCleaned,
+    config,
+    replyConfig: replyConfig || config,
+    args,
+  }).catch((error) => {
+    appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] interactive watcher failed: ${error.stack || error.message}\n`);
+  });
+  return watcher;
+}
+
+async function runInteractiveWatcher(watcher, { task, sessionName, previousCleaned, config, replyConfig, args = {} }) {
+  const timeoutMs = interactiveResponseTimeoutMs(config);
+  const pollMs = interactiveResponsePollMs(config);
+  const statusIntervalMs = interactiveWatchStatusIntervalMs(config);
+  const deadline = Date.now() + timeoutMs;
+  let lastOutput = "";
+  let stableCount = 0;
+
+  try {
+    await delay(interactiveCaptureDelayMs(config));
+    while (!watcher.cancelled && Date.now() < deadline) {
+      if (!tmuxHasSession(sessionName)) {
+        await sendWatcherTextWithMedia(
+          interactiveWatcherReply(task.id, sessionName, "tmux 会话已结束", lastOutput, Date.now() - watcher.startedAt),
+          replyConfig,
+          args,
+        );
+        return;
+      }
+
+      const pane = captureTmuxPane(sessionName, config);
+      const cleaned = cleanInteractiveCapture(pane);
+      const output = outputAfterPrevious(cleaned, previousCleaned);
+      const question = extractInteractiveQuestion(pane);
+      if (question) {
+        await sendWatcherTextWithMedia(
+          [
+            taskHeader(task.id, "等待选择"),
+            `会话: ${sessionName}`,
+            "",
+            question.text,
+          ].join("\n"),
+          replyConfig,
+          args,
+        );
+        return;
+      }
+
+      if (output && paneLooksDone(pane) && output === lastOutput) {
+        stableCount += 1;
+        if (stableCount >= 1) {
+          await sendWatcherTextWithMedia(
+            interactiveWatcherReply(task.id, sessionName, "完成", output, Date.now() - watcher.startedAt),
+            replyConfig,
+            args,
+          );
+          updateTask(task.id, (current) => ({
+            ...current,
+            lastInteractiveCompletedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }));
+          return;
+        }
+      } else if (output) {
+        lastOutput = output;
+        stableCount = 0;
+      }
+
+      const elapsed = Date.now() - watcher.startedAt;
+      if (statusIntervalMs > 0 && Date.now() - watcher.lastStatusAt >= statusIntervalMs) {
+        watcher.lastStatusAt = Date.now();
+        await sendWatcherText(taskHeader(task.id, `仍在运行，已 ${formatDuration(elapsed)}`), replyConfig, args);
+      }
+      await delay(pollMs);
+    }
+
+    if (!watcher.cancelled) {
+      await sendWatcherTextWithMedia(
+        interactiveWatcherReply(task.id, sessionName, "仍在运行，watcher 已到兜底超时", lastOutput, Date.now() - watcher.startedAt),
+        replyConfig,
+        args,
+      );
+    }
+  } finally {
+    if (interactiveWatchers.get(watcher.taskId) === watcher) {
+      interactiveWatchers.delete(watcher.taskId);
+      clearPersistedInteractiveWatcher(watcher.taskId);
+    }
+  }
 }
 
 function waitForInteractiveReady(sessionName, config) {
@@ -1871,7 +2034,7 @@ function sendTextToTmux(sessionName, text) {
   }
 }
 
-function sendInteractiveInstruction(task, text, attachments, config) {
+function sendInteractiveInstruction(task, text, attachments, config, options = {}) {
   const imagePaths = imagePathsFromAttachments(attachments);
   const mapped = mapInteractiveCommand(text, attachments);
   if (config.dryRun) {
@@ -1889,18 +2052,19 @@ function sendInteractiveInstruction(task, text, attachments, config) {
   waitForInteractiveReady(sessionName, config);
   const before = cleanInteractiveCapture(captureTmuxPane(sessionName, config));
   sendTextToTmux(sessionName, mapped);
-  sleepSync(interactiveCaptureDelayMs(config));
-  let output = waitForInteractiveResponse(sessionName, before, config);
-  if (!output) {
-    spawnSync("tmux", ["send-keys", "-t", sessionName, "C-m"], { encoding: "utf8" });
-    output = waitForInteractiveResponse(sessionName, before, config);
-  }
-  const question = currentInteractiveQuestion(sessionName, config);
+  startInteractiveWatcher({
+    task,
+    sessionName,
+    previousCleaned: before,
+    config,
+    replyConfig: options.replyConfig || config,
+    args: options.args || {},
+  });
   return [
     taskHeader(task.id, started ? "interactive 已启动并发送" : "interactive 已发送"),
     `会话: ${sessionName}`,
     "",
-    question ? question.text : compactLines(output || "(暂无可抓取输出)", 3000),
+    "状态: 已进入后台等待，完成或需要选择时会自动发回微信。",
   ].join("\n");
 }
 
@@ -2281,7 +2445,7 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   return latest;
 }
 
-function forwardToTask(task, text, config, fromUser = "", attachments = []) {
+function forwardToTask(task, text, config, fromUser = "", attachments = [], options = {}) {
   task = refreshTaskLiveness(task);
   const instruction = String(text || "").trim();
   if (!instruction && attachments.length === 0) return `task ${task.id}: 空消息已忽略`;
@@ -2290,9 +2454,9 @@ function forwardToTask(task, text, config, fromUser = "", attachments = []) {
   if (simpleCommand) return runSimpleCommand(task, simpleCommand);
 
   if (selectedRunner(config) === "interactive") {
-    const answeredQuestion = answerInteractiveQuestion(task, instruction, config);
+    const answeredQuestion = answerInteractiveQuestion(task, instruction, config, options);
     if (answeredQuestion) return answeredQuestion;
-    return sendInteractiveInstruction(task, instruction, attachments, config);
+    return sendInteractiveInstruction(task, instruction, attachments, config, options);
   }
 
   const entry = {
@@ -2395,12 +2559,14 @@ function closeTaskTargets(targets, fromUser = "", options = {}) {
     }
 
     const closedAt = new Date().toISOString();
+    stopInteractiveWatcher(task.id);
     updateTask(task.id, (current) => ({
       ...current,
       status: "closed",
       closedAt,
       updatedAt: closedAt,
       pendingInstructions: [],
+      interactiveWatch: null,
       signal: "closed-by-user",
       tmuxClosed: Boolean(killed),
     }));
@@ -2535,6 +2701,7 @@ function restartActiveTaskSessionsOnRouterStart(config, args = {}) {
         tmuxPanePid: "",
         pid: "",
         runId: "",
+        interactiveWatch: null,
         signal: "router-restart",
         tmuxClosed: killed,
         restartedAt,
@@ -2581,6 +2748,40 @@ function recoverStaleTaskQueues(config) {
     recovered.push(updated.id);
   }
   return recovered;
+}
+
+function resumePersistedInteractiveWatchers(config, args = {}) {
+  if (config.dryRun) return [];
+  if (selectedRunner(config) !== "interactive") return [];
+
+  const resumed = [];
+  const state = loadTasks();
+  for (const task of state.tasks) {
+    const watch = task.interactiveWatch;
+    if (!watch || typeof watch !== "object") continue;
+    const sessionName = watch.sessionName || task.tmuxSession || makeTmuxSessionName(task);
+    if (!sessionName || !tmuxHasSession(sessionName)) {
+      clearPersistedInteractiveWatcher(task.id);
+      continue;
+    }
+    const startedAt = Date.parse(watch.startedAt || "") || Date.now();
+    const replyConfig = {
+      ...config,
+      toUser: watch.toUser || config.toUser,
+      contextToken: watch.contextToken || config.contextToken,
+    };
+    startInteractiveWatcher({
+      task,
+      sessionName,
+      previousCleaned: watch.previousCleaned || "",
+      config,
+      replyConfig,
+      args,
+      startedAt,
+    });
+    resumed.push({ id: String(task.id), sessionName });
+  }
+  return resumed;
 }
 
 function formatTaskBlock(task, fromUser = "") {
@@ -2631,7 +2832,7 @@ function parseCommand(text) {
   return { type: "message", text: trimmed };
 }
 
-async function handleText(text, fromUser, config) {
+async function handleText(text, fromUser, config, options = {}) {
   const command = parseCommand(text);
   if (command.type === "list") return formatList(fromUser);
   if (command.type === "tmux-clean") return cleanupLegacyTaskTmuxSessions({ dryRun: Boolean(config.dryRun) });
@@ -2644,15 +2845,15 @@ async function handleText(text, fromUser, config) {
 
   const task = getCurrentTask(fromUser);
   if (!task) return "task 0: 状态异常，未找到默认任务。";
-  return forwardToTask(task, command.text, config, fromUser);
+  return forwardToTask(task, command.text, config, fromUser, [], options);
 }
 
-async function handleTextWithAttachments(text, fromUser, config, attachments = []) {
-  if (attachments.length === 0) return handleText(text, fromUser, config);
+async function handleTextWithAttachments(text, fromUser, config, attachments = [], options = {}) {
+  if (attachments.length === 0) return handleText(text, fromUser, config, options);
   const task = getCurrentTask(fromUser);
   if (!task) return "task 0: 状态异常，未找到默认任务。";
   const savedAttachments = await saveInboundMediaForTask(task, attachments, config);
-  return forwardToTask(task, text, config, fromUser, savedAttachments);
+  return forwardToTask(task, text, config, fromUser, savedAttachments, options);
 }
 
 function inboundHeartbeatText(text, fromUser, attachments = []) {
@@ -2719,7 +2920,10 @@ async function runPoll(args, config) {
           contextToken: message.context_token || config.contextToken,
         };
         await sendInboundHeartbeat(text, replyTarget, replyConfig, args, attachments);
-        const response = await handleTextWithAttachments(text, replyTarget, config, attachments);
+        const response = await handleTextWithAttachments(text, replyTarget, config, attachments, {
+          replyConfig,
+          args,
+        });
         await sendTextWithMedia(response, replyConfig, args);
       } catch (error) {
         appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] ${error.stack || error.message}\n`);
@@ -2766,6 +2970,10 @@ async function main() {
   const recovered = recoverStaleTaskQueues(config);
   if (recovered.length > 0) {
     process.stdout.write(`Recovered stale queued tasks: ${recovered.join(", ")}\n`);
+  }
+  const resumedWatchers = resumePersistedInteractiveWatchers(config, args);
+  if (resumedWatchers.length > 0) {
+    process.stdout.write(`Resumed interactive watchers: ${resumedWatchers.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
   }
   await runPoll(args, config);
 }
