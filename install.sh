@@ -154,5 +154,7 @@ Next steps:
 
   5. In Weixin, send:
      list
+     列表
      summarize this repository
+     总结这个仓库
 EOF

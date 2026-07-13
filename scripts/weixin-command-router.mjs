@@ -331,7 +331,38 @@ function taskWorkingCwd(taskId, currentCwd = "", config = runtimeConfig) {
 function isValidAlias(alias) {
   const name = String(alias || "").trim();
   if (!name || /\s/u.test(name) || /^\d+$/u.test(name)) return false;
-  return !new Set(["task", "list", "close", "alias", "unalias", "pwd", "ls", "snap", "screenshot"]).has(name.toLowerCase());
+  return !new Set([
+    "task",
+    "list",
+    "close",
+    "alias",
+    "unalias",
+    "pwd",
+    "ls",
+    "snap",
+    "screenshot",
+    "任务列表",
+    "列任务",
+    "查看任务",
+    "任务",
+    "列表",
+    "关闭",
+    "结束",
+    "别名",
+    "取消别名",
+    "删除别名",
+    "重置",
+    "截图",
+    "快照",
+    "当前目录",
+    "工作目录",
+    "列文件",
+    "文件列表",
+    "列目录",
+    "查看目录",
+    "计划",
+    "目标",
+  ]).has(name.toLowerCase());
 }
 
 function taskNeedsCwdReset(task) {
@@ -428,7 +459,7 @@ function userKey(fromUser) {
 
 function findTaskByTarget(target) {
   const state = loadTasks();
-  const normalized = String(target || "").trim().replace(/^task\s+/i, "");
+  const normalized = String(target || "").trim().replace(/^(?:task|任务)\s+/iu, "");
   return state.tasks.find((task) => {
     return String(task.id) === normalized
       || String(task.alias || "") === normalized
@@ -445,7 +476,7 @@ function getCurrentTask(fromUser) {
 
 function setCurrentTask(fromUser, target, options = {}) {
   const task = findTaskByTarget(target);
-  if (!task) return { ok: false, message: `task ${target}: 不存在。发送 list 查看任务。` };
+  if (!task) return { ok: false, message: `task ${target}: 不存在。发送 list 或 列表 查看任务。` };
   if (options.dryRun) {
     return {
       ok: true,
@@ -479,7 +510,7 @@ function createTaskSlot(taskId, fromUser = "", options = {}) {
   const id = String(taskId);
   const numericId = Number(id);
   if (!Number.isInteger(numericId) || numericId < 1) {
-    return { ok: false, message: `task ${id}: 只能创建 task 1 及以后的数字任务。` };
+    return { ok: false, message: `task ${id}: 只能创建 task 1 / 任务 1 及以后的数字任务。` };
   }
 
   const state = loadTasks();
@@ -488,7 +519,7 @@ function createTaskSlot(taskId, fromUser = "", options = {}) {
 
   const nextId = Number(state.nextTaskId || 1);
   if (numericId !== nextId) {
-    return { ok: false, message: `task ${id}: 不存在。只能创建 task ${nextId}，task id 必须每次加 1。` };
+    return { ok: false, message: `task ${id}: 不存在。只能创建 task ${nextId} / 任务 ${nextId}，task id 必须每次加 1。` };
   }
 
   const cwd = taskWorkingCwd(id, "", runtimeConfig);
@@ -514,7 +545,7 @@ function createTaskSlot(taskId, fromUser = "", options = {}) {
 
 function enterTask(target, fromUser = "", options = {}) {
   const normalized = String(target || "").trim();
-  if (!normalized) return "缺少 task 编号或别名。用法：task 1";
+  if (!normalized) return "缺少 task 编号或别名。用法：task 1 / 任务 1";
 
   if (/^\d+$/u.test(normalized)) {
     const existing = findTaskByTarget(normalized);
@@ -546,7 +577,7 @@ function enterTask(target, fromUser = "", options = {}) {
   }
 
   const task = findTaskByTarget(normalized);
-  if (!task || !task.alias) return `task ${normalized}: 别名不存在。用 task alias N ${normalized} 设置。`;
+  if (!task || !task.alias) return `task ${normalized}: 别名不存在。用 task alias N ${normalized} / 任务 别名 N ${normalized} 设置。`;
   const switched = setCurrentTask(fromUser, task.id, options);
   if (!switched.ok) return switched.message;
   return [
@@ -560,10 +591,10 @@ function enterTask(target, fromUser = "", options = {}) {
 function setTaskAlias(taskTarget, alias, options = {}) {
   const name = String(alias || "").trim();
   if (!isValidAlias(name)) {
-    return "别名无效。别名不能是纯数字、不能有空格，也不能使用 task/list/close/alias/unalias/pwd/ls。";
+    return "别名无效。别名不能是纯数字、不能有空格，也不能使用 task/list/close/alias/unalias/pwd/ls 或 任务/列表/关闭/别名/当前目录/列文件 等控制词。";
   }
   const task = findTaskByTarget(taskTarget);
-  if (!task) return `task ${taskTarget}: 不存在，先用 task ${taskTarget} 创建。`;
+  if (!task) return `task ${taskTarget}: 不存在，先用 task ${taskTarget} / 任务 ${taskTarget} 创建。`;
   const conflict = findTaskByTarget(name);
   if (conflict && String(conflict.id) !== String(task.id)) {
     return `别名 ${name} 已被 task ${conflict.id} 使用。`;
@@ -592,7 +623,7 @@ function unsetTaskAlias(target, options = {}) {
 
 function resetTaskTargets(targets, options = {}) {
   const ids = targets.map((target) => String(target).trim()).filter(Boolean);
-  if (ids.length === 0) return "没有指定要 reset 的 task。用法：task reset 1";
+  if (ids.length === 0) return "没有指定要 reset / 重置 的 task。用法：task reset 1 / 任务 重置 1";
 
   const lines = [];
   const seenTaskIds = new Set();
@@ -609,7 +640,7 @@ function resetTaskTargets(targets, options = {}) {
       lines.push([
         taskHeader(task.id, "不能 reset"),
         `状态: ${task.status}`,
-        `先执行: task close ${task.id}`,
+        `先执行: task close ${task.id} / 任务 关闭 ${task.id}`,
       ].join("\n"));
       continue;
     }
@@ -2005,13 +2036,20 @@ function ensureInteractiveSession(task, config, imagePaths = []) {
 function mapInteractiveCommand(text, attachments = []) {
   const instruction = instructionWithAttachments(text, attachments);
   const trimmed = instruction.trim();
-  const planMatch = trimmed.match(/^plan(?:\s+(.+))?$/isu);
+  const planMatch = trimmed.match(/^(?:plan|计划)(?:\s+(.+))?$/isu);
   if (planMatch) return `/plan${planMatch[1] ? ` ${planMatch[1].trim()}` : ""}`;
-  const goalMatch = trimmed.match(/^(?:goal|gloal)(?:\s+(.+))?$/isu);
+  const goalMatch = trimmed.match(/^(?:goal|gloal|目标)(?:\s+(.+))?$/isu);
   if (goalMatch) {
     const arg = String(goalMatch[1] || "").trim();
-    if (!arg || /^status$/iu.test(arg)) return "/goal";
-    return `/goal ${arg}`;
+    if (!arg || /^(?:status|状态)$/iu.test(arg)) return "/goal";
+    const mappedArg = {
+      暂停: "pause",
+      继续: "resume",
+      恢复: "resume",
+      清除: "clear",
+      清空: "clear",
+    }[arg] || arg;
+    return `/goal ${mappedArg}`;
   }
   return trimmed;
 }
@@ -2278,11 +2316,11 @@ function extractSessionIdFromJsonl(filePath) {
 
 function parsedSimpleCommand(text) {
   const trimmed = String(text || "").trim();
-  if (/^pwd$/iu.test(trimmed)) return { name: "pwd", args: [] };
-  if (!/^ls(?:\s|$)/iu.test(trimmed)) return null;
+  if (/^(?:pwd|当前目录|工作目录)$/iu.test(trimmed)) return { name: "pwd", args: [] };
+  const lsMatch = trimmed.match(/^(ls|列文件|文件列表|列目录|查看目录)(?:\s+(.+))?$/iu);
+  if (!lsMatch) return null;
 
-  const words = splitWords(trimmed);
-  if (words[0] !== "ls") return null;
+  const words = ["ls", ...splitWords(lsMatch[2] || "")];
   const allowedFlags = new Set(["-a", "-l", "-la", "-al", "-lh", "-hl", "-lah", "-alh", "-hla", "-hal"]);
   const flags = [];
   const paths = [];
@@ -2511,7 +2549,7 @@ function forwardToTask(task, text, config, fromUser = "", attachments = [], opti
 
 function closeTaskTargets(targets, fromUser = "", options = {}) {
   const ids = targets.map((target) => String(target).trim()).filter(Boolean);
-  if (ids.length === 0) return "没有指定要关闭的 task。用法：task close 1";
+  if (ids.length === 0) return "没有指定要关闭的 task。用法：task close 1 / 任务 关闭 1";
 
   const lines = [];
   const seenTaskIds = new Set();
@@ -2810,24 +2848,29 @@ async function formatList(fromUser = "") {
 
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
-  if (/^list$/iu.test(trimmed)) return { type: "list" };
-  if (/^task\s+tmux\s+clean$/iu.test(trimmed)) return { type: "tmux-clean" };
-  if (/^task\s+(?:snap|screenshot)$/iu.test(trimmed)) return { type: "snapshot" };
-  const aliasMatch = trimmed.match(/^task\s+alias\s+(\S+)\s+(\S+)$/iu);
+  const taskKeyword = "(?:task|任务)";
+  if (/^(?:list|列表|任务列表|列任务|查看任务)$/iu.test(trimmed)) return { type: "list" };
+  if (/^(?:task|任务)\s+tmux\s+(?:clean|清理)$/iu.test(trimmed) || /^清理\s*tmux$/iu.test(trimmed)) {
+    return { type: "tmux-clean" };
+  }
+  if (new RegExp(`^${taskKeyword}\\s+(?:snap|screenshot|截图|快照)$`, "iu").test(trimmed) || /^(?:截图|快照)$/iu.test(trimmed)) {
+    return { type: "snapshot" };
+  }
+  const aliasMatch = trimmed.match(new RegExp(`^${taskKeyword}\\s+(?:alias|别名)\\s+(\\S+)\\s+(\\S+)$`, "iu"));
   if (aliasMatch) return { type: "alias", target: aliasMatch[1], alias: aliasMatch[2] };
-  const unaliasMatch = trimmed.match(/^task\s+unalias\s+(\S+)$/iu);
+  const unaliasMatch = trimmed.match(new RegExp(`^${taskKeyword}\\s+(?:unalias|取消别名|删除别名)\\s+(\\S+)$`, "iu"));
   if (unaliasMatch) return { type: "unalias", target: unaliasMatch[1] };
-  const resetMatch = trimmed.match(/^task\s+reset\s+(.+)$/iu);
+  const resetMatch = trimmed.match(new RegExp(`^${taskKeyword}\\s+(?:reset|重置)\\s+(.+)$`, "iu"));
   if (resetMatch) {
     const targets = resetMatch[1].split(/\s+/u).filter(Boolean);
     return { type: "reset", targets };
   }
-  const closeMatch = trimmed.match(/^task\s+close\s+(.+)$/iu);
+  const closeMatch = trimmed.match(new RegExp(`^${taskKeyword}\\s+(?:close|关闭|结束)\\s+(.+)$`, "iu"));
   if (closeMatch) {
     const targets = closeMatch[1].split(/\s+/u).filter(Boolean);
     return { type: "close", targets };
   }
-  const taskMatch = trimmed.match(/^task\s+(\S+)$/iu);
+  const taskMatch = trimmed.match(new RegExp(`^${taskKeyword}\\s+(\\S+)$`, "iu"));
   if (taskMatch) return { type: "enter", target: taskMatch[1] };
   return { type: "message", text: trimmed };
 }
@@ -2900,7 +2943,7 @@ async function runOnce(args, config) {
 
 async function runPoll(args, config) {
   let sync = loadCommandSync();
-  process.stdout.write("Listening for Weixin Codex tasks. Send 'list' or 'task 0'.\n");
+  process.stdout.write("Listening for Weixin Codex tasks. Send 'list' / '列表' or 'task 0' / '任务 0'.\n");
 
   while (true) {
     const updates = await getUpdates(config, sync);

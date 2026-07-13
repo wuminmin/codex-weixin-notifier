@@ -66,14 +66,14 @@ First-run journey:
 1. Run `pair-weixin.mjs` in the WSL terminal. It prints a terminal QR code; scan it with Weixin and confirm authorization on the phone.
 2. Send `bind codex` to the paired Weixin bot, then run `bind-recipient.mjs` in the terminal. This captures the recipient and `contextToken` required by iLink sends.
 3. Start the router with `start-router-tmux.sh`. The command is idempotent and should print `codex-wx-router: started` or `already running`.
-4. In Weixin, send `list` to confirm the bot is alive, then send the first real request, for example `summarize this repository`. Ordinary text is forwarded to the current task, normally `task 0`.
+4. In Weixin, send `list` or `列表` to confirm the bot is alive, then send the first real request, for example `summarize this repository` or `总结这个仓库`. Ordinary text is forwarded to the current task, normally `task 0`.
 5. If Codex asks a `Question 1/1` multiple-choice prompt, Weixin receives the full question text and numbered options. Reply with `1`, `2`, etc. to answer it.
 
 ## Architecture
 
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
 - `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint. Completion notifications are rendered as terminal-style long PNG images by default.
-- `scripts/weixin-command-router.mjs` long-polls inbound Weixin messages, keeps a numbered task list, switches the current task with `task N`, and forwards ordinary text to the selected Codex task.
+- `scripts/weixin-command-router.mjs` long-polls inbound Weixin messages, keeps a numbered task list, switches the current task with `task N` / `任务 N`, and forwards ordinary text to the selected Codex task.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
 
@@ -184,41 +184,69 @@ Send these messages to the paired Weixin bot:
 
 ```text
 list
+列表
 task 0
+任务 0
 task 1
+任务 1
 task close 1
+任务 关闭 1
 task reset 1
+任务 重置 1
 task alias 1 godot
+任务 别名 1 godot
 task godot
+任务 godot
 task tmux clean
+任务 tmux 清理
 task snap
+任务 截图
 pwd
+当前目录
 ls
+列文件
 ls /path/to/project
+列文件 /path/to/project
 add tests for codex-weixin-notifier
+给 codex-weixin-notifier 加测试
 continue by updating the README too
+继续把 README 也更新
 ```
 
 The command vocabulary is intentionally small:
 
 ```text
 list
+列表
 task 0
+任务 0
 task 1
+任务 1
 task 2
+任务 2
 task close 1
+任务 关闭 1
 task reset 1
+任务 重置 1
 task alias 1 godot
+任务 别名 1 godot
 task godot
+任务 godot
 task unalias godot
+任务 取消别名 godot
 task tmux clean
+任务 tmux 清理
 task snap
+任务 截图
 task screenshot
+截图
 pwd
+当前目录
 ls
+列文件
 ```
 
-`task 0` is the default Codex assistant and always exists. `task 1`, `task 2`, and later tasks are explicit task slots created only by `task N` commands. The router handles exact `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot` messages, plus a small WSL command whitelist: `pwd`, `ls`, and `ls` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+`task 0` / `任务 0` is the default Codex assistant and always exists. `task 1` / `任务 1`, `task 2` / `任务 2`, and later tasks are explicit task slots created only by `task N` or `任务 N` commands. The router handles exact English commands such as `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot`, plus Chinese equivalents such as `列表`, `任务 N`, `任务 关闭 N`, `任务 重置 N`, `任务 别名 N name`, `任务 name`, `任务 tmux 清理`, and `任务 截图`. It also accepts a small WSL command whitelist: `pwd` / `当前目录`, `ls` / `列文件`, and `ls` / `列文件` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
 By default, each task is a long-running interactive Codex session in a fixed tmux session. When the router starts, it restarts all active task sessions so task tmux panes pick up new router/Codex arguments after a router restart. Set `CODEX_WEIXIN_RESTART_TASKS_ON_ROUTER_START=0`, `"restartTasksOnRouterStart": false`, or pass `--no-restart-tasks` to the router to disable that startup restart. The router starts task `N` with this shape:
 
@@ -228,11 +256,11 @@ codex --no-alt-screen \
   -C "${CODEX_WEIXIN_CODEX_CWD:-$HOME}"
 ```
 
-When the router receives an ordinary task message, it first sends a small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and starts a background watcher. The watcher keeps the router free for other Weixin commands, sends choice prompts immediately, and sends the final rendered image after Codex prints `Worked` or returns to the input prompt. It maps `plan ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, and `goal clear` to the native `/goal` slash command family.
+When the router receives an ordinary task message, it first sends a small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and starts a background watcher. The watcher keeps the router free for other Weixin commands, sends choice prompts immediately, and sends the final rendered image after Codex prints `Worked` or returns to the input prompt. It maps `plan ...` / `计划 ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, `goal clear`, plus `目标 ...`, `目标 状态`, `目标 暂停`, `目标 继续`, and `目标 清除`, to the native `/goal` slash command family.
 
 When Codex enters an interactive `Question 1/1` choice prompt, the router formats the full question text and numbered options for Weixin, including wrapped prompt and option lines from the terminal. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
 
-Send `task snap` or `task screenshot` to render the current task's tmux pane as one or more terminal-style PNG images and send them back to Weixin. This is a static snapshot; continue to control Codex by sending normal text replies.
+Send `task snap`, `task screenshot`, `任务 截图`, or `截图` to render the current task's tmux pane as one or more terminal-style PNG images and send them back to Weixin. This is a static snapshot; continue to control Codex by sending normal text replies.
 
 Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create a task slot and data directory, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
 
@@ -240,14 +268,18 @@ Task ids are monotonic and are never deleted or reused. If the next id is `3`, `
 
 ```text
 task close 1
+任务 关闭 1
 task close 1 godot
+任务 关闭 1 godot
 ```
 
-`task reset` accepts one or more task ids or aliases. It clears Codex resume state so the next message starts a fresh Codex session in the configured working directory. It does not delete files, aliases, task ids, historical log files, or `~/codex/taskN` data directory content; it only clears the task's pointer to the previous run logs so old session ids cannot be restored. Running tasks must be closed first:
+`task reset` / `任务 重置` accepts one or more task ids or aliases. It clears Codex resume state so the next message starts a fresh Codex session in the configured working directory. It does not delete files, aliases, task ids, historical log files, or `~/codex/taskN` data directory content; it only clears the task's pointer to the previous run logs so old session ids cannot be restored. Running tasks must be closed first:
 
 ```text
 task close 1
+任务 关闭 1
 task reset 1
+任务 重置 1
 ```
 
 tmux task sessions are fixed by task id:
@@ -295,12 +327,27 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
+  --message "列表"
+
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --once \
+  --dry-run \
   --message "task close 999"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
+  --message "任务 关闭 999"
+
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --once \
+  --dry-run \
   --message "task reset 1"
+
+node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+  --once \
+  --dry-run \
+  --message "任务 重置 1"
 
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
   --once \
