@@ -74,6 +74,7 @@ First-run journey:
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
 - `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint. Completion notifications are rendered as terminal-style long PNG images by default.
 - `scripts/weixin-command-router.mjs` long-polls inbound Weixin messages, keeps a numbered task list, switches the current task with `task N` / `任务 N`, and forwards ordinary text to the selected Codex task.
+- `scripts/codex-task-state-hook.mjs` records Codex lifecycle events from WSL CLI and VS Code into a small local session registry. `scripts/codex-task-monitor.mjs` merges that registry with Weixin-managed tmux tasks and renders the fixed `任务`, `进度`, and `状态` views without invoking a model.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
 
@@ -172,11 +173,14 @@ wsl.exe -- bash -lc "/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
 /path/to/codex-weixin-notifier/scripts/start-router-tmux.sh --restart
 ```
 
+When the current Codex task is the same CLI session performing an update, use `scripts/restart-router-after-task-idle.sh codex-wx-task-N` in a separate tmux session. It waits for the visible `Working (...)` indicator to clear, then restarts the router and all active managed CLI task sessions.
+
 The router stores state in:
 
 ```text
 ~/.codex/weixin-notifier/tasks.json
 ~/.codex/weixin-notifier/current-task.json
+~/.codex/weixin-notifier/codex-sessions.json
 ~/.codex/weixin-notifier/logs/
 ```
 
@@ -185,6 +189,9 @@ Send these messages to the paired Weixin bot:
 ```text
 list
 列表
+任务
+进度
+状态
 task 0
 任务 0
 task 1
@@ -218,6 +225,9 @@ The command vocabulary is intentionally small:
 ```text
 list
 列表
+任务
+进度
+状态
 task 0
 任务 0
 task 1
@@ -246,7 +256,25 @@ ls
 列文件
 ```
 
+`任务`, `进度`, and `状态` are exact local commands and never reach Codex. `任务` merges the numbered Weixin tasks with recent WSL CLI and VS Code sessions, `进度` keeps only running or waiting work, and `状态` reports router, tmux, CLI, VS Code app-server, and Hook health. `list` / `列表` keeps the original numbered-task-only view.
+
 `task 0` / `任务 0` is the default Codex assistant and always exists. `task 1` / `任务 1`, `task 2` / `任务 2`, and later tasks are explicit task slots created only by `task N` or `任务 N` commands. The router handles exact English commands such as `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot`, plus Chinese equivalents such as `列表`, `任务 N`, `任务 关闭 N`, `任务 重置 N`, `任务 别名 N name`, `任务 name`, `任务 tmux 清理`, and `任务 截图`. It also accepts a small WSL command whitelist: `pwd` / `当前目录`, `ls` / `列文件`, and `ls` / `列文件` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+
+## Local Task Monitor
+
+Add the lifecycle entries from `scripts/codex-task-hooks.example.toml` to the user-level `~/.codex/config.toml`, using the actual absolute plugin path. Restart Codex CLI sessions after changing the configuration and reload the VS Code window when convenient. New or changed command Hooks must be reviewed in `/hooks`; automation that has already vetted the Hook source can use Codex's explicit `--dangerously-bypass-hook-trust` option.
+
+The monitor records only operational task metadata: session id, source surface, working directory, lifecycle status, current tool/stage, and timestamps. It does not call an AI model. Writes to `codex-sessions.json` are lock-protected and atomically renamed so concurrent CLI and VS Code events do not corrupt the registry.
+
+For VS Code threads that were already open before the Hook configuration was loaded, the monitor has a read-only compatibility fallback that scans recent local session transcripts for `task_started` and `task_complete` events. Hook data takes precedence as soon as a lifecycle event is received. Transcript fallback is deliberately limited to recent VS Code sessions because Codex documents transcript files as a convenience rather than a stable Hook API.
+
+Run the same fixed views locally:
+
+```bash
+node scripts/codex-task-monitor.mjs tasks
+node scripts/codex-task-monitor.mjs progress
+node scripts/codex-task-monitor.mjs status
+```
 
 By default, each task is a long-running interactive Codex session in a fixed tmux session. When the router starts, it restarts all active task sessions so task tmux panes pick up new router/Codex arguments after a router restart. Set `CODEX_WEIXIN_RESTART_TASKS_ON_ROUTER_START=0`, `"restartTasksOnRouterStart": false`, or pass `--no-restart-tasks` to the router to disable that startup restart. The router starts task `N` with this shape:
 
@@ -256,7 +284,7 @@ codex --no-alt-screen \
   -C "${CODEX_WEIXIN_CODEX_CWD:-$HOME}"
 ```
 
-When the router receives an ordinary task message, it first sends a small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and starts a background watcher. The watcher keeps the router free for other Weixin commands, sends choice prompts immediately, and sends the final rendered image after Codex prints `Worked` or returns to the input prompt. It maps `plan ...` / `计划 ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, `goal clear`, plus `目标 ...`, `目标 状态`, `目标 暂停`, `目标 继续`, and `目标 清除`, to the native `/goal` slash command family.
+When the router receives an ordinary task message, it sends one small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and starts a background watcher. That heartbeat is the only dispatch acknowledgement: the router does not send a second long-image `interactive 已发送 / 已进入后台等待` reply. The watcher keeps the router free for other Weixin commands, sends choice prompts immediately, and sends the final rendered image after Codex prints `Worked` or returns to the input prompt. It maps `plan ...` / `计划 ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, `goal clear`, plus `目标 ...`, `目标 状态`, `目标 暂停`, `目标 继续`, and `目标 清除`, to the native `/goal` slash command family.
 
 When Codex enters an interactive `Question 1/1` choice prompt, the router formats the full question text and numbered options for Weixin, including wrapped prompt and option lines from the terminal. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
 
@@ -376,7 +404,7 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
 }
 ```
 
-For this WSL-first setup, Weixin tasks can run interactive Codex with `--dangerously-bypass-approvals-and-sandbox` by setting `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` or `"codexBypassSandbox": true`. This removes the Codex sandbox and approval prompts for child tasks, so a Weixin message can trigger writes anywhere the WSL user can access. Existing tmux task sessions keep the arguments they were started with; close and re-enter a task to pick up changed Codex arguments.
+For this WSL-first setup, Weixin tasks can run interactive Codex with `--dangerously-bypass-approvals-and-sandbox` by setting `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX=1` or `"codexBypassSandbox": true`. This removes the Codex sandbox and approval prompts for child tasks, so a Weixin message can trigger writes anywhere the WSL user can access. Separately, vetted automation can set `CODEX_WEIXIN_CODEX_BYPASS_HOOK_TRUST=1` or `"codexBypassHookTrust": true` to add Codex's explicit `--dangerously-bypass-hook-trust` flag. Existing tmux task sessions keep the arguments they were started with; close and re-enter a task to pick up changed Codex arguments.
 
 `runner` defaults to `interactive` when tmux is installed. Set `CODEX_WEIXIN_RUNNER=tmux` for the older `codex exec` inside tmux behavior, or `CODEX_WEIXIN_RUNNER=spawn` for direct `codex exec`. Interactive tasks keep an attachable session open:
 
@@ -384,7 +412,7 @@ For this WSL-first setup, Weixin tasks can run interactive Codex with `--dangero
 tmux attach -t codex-wx-task-...
 ```
 
-By default, task Codex sessions use `$HOME` as their working directory instead of being pinned to `~/codex/taskN`. Set `CODEX_WEIXIN_CODEX_CWD` or `"codexCwd"` to choose a different default working directory. `~/codex/taskN` is still used as the task data directory for inbound attachments and durable task metadata; `CODEX_WEIXIN_TASK_ROOT` can override that data root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
+By default, task Codex sessions use `$HOME` as their working directory instead of being pinned to `~/codex/taskN`. Set `CODEX_WEIXIN_CODEX_CWD` or `"codexCwd"` to choose a different default working directory. `~/codex/taskN` is still used as the task data directory for inbound attachments and durable task metadata; `CODEX_WEIXIN_TASK_ROOT` can override that data root for tests or a custom install. `CODEX_WEIXIN_RUNNER`, `CODEX_WEIXIN_CODEX_COMMAND`, `CODEX_WEIXIN_CODEX_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_SANDBOX`, `CODEX_WEIXIN_CODEX_BYPASS_HOOK_TRUST`, `CODEX_WEIXIN_CODEX_GLOBAL_ARGS`, and `CODEX_WEIXIN_CODEX_ARGS` can override runtime behavior.
 
 For interactive replies, the router sends the heartbeat immediately, then tracks the tmux pane in the background until Codex shows a choice prompt, returns to an input prompt, or prints the final `Worked` status before rendering the Weixin image. Watcher state is stored in task metadata so a router restart with `--no-restart-tasks` can resume waiting for the same tmux task. `interactiveResponseTimeoutMs` is only an abnormal watcher timeout and defaults to 21600000 ms. Override it with `CODEX_WEIXIN_INTERACTIVE_RESPONSE_TIMEOUT_MS` or `"interactiveResponseTimeoutMs"`. Long-running tasks send a light status text every 1800000 ms by default; override with `CODEX_WEIXIN_INTERACTIVE_WATCH_STATUS_INTERVAL_MS` or `"interactiveWatchStatusIntervalMs"`, or set it to `0` to disable status pings.
 
@@ -469,7 +497,7 @@ CODEX_SESSION_ID="vscode-${VSCODE_PID:-window}-$$"
 CODEX_PRODUCT="vscode-codex"
 ```
 
-For Codex Stop hooks, use `scripts/codex-finish-hook.mjs` instead of calling `notify-weixin.mjs` directly. The hook writes the event to `/tmp/codex-weixin-notifier-hooks/`, starts `notify-weixin.mjs` in a short-lived background tmux session, and exits immediately so Codex does not fail the hook when Weixin rendering or upload takes longer than the host hook timeout. Hook launcher and sender output is appended to `/tmp/codex-weixin-notifier-hook.log`.
+For Codex Stop hooks, use `scripts/codex-finish-hook.mjs` instead of calling `notify-weixin.mjs` directly. It first records the completed task state, then writes the notification event to `/tmp/codex-weixin-notifier-hooks/`, starts `notify-weixin.mjs` in a short-lived background tmux session, and exits immediately so Codex does not fail the hook when Weixin rendering or upload takes longer than the host hook timeout. Hook launcher and sender output is appended to `/tmp/codex-weixin-notifier-hook.log`.
 
 ## Publishing
 

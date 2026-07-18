@@ -1,0 +1,47 @@
+# Add these entries to the user-level ~/.codex/config.toml. Replace the script
+# path when the plugin is installed somewhere else. Keep the existing Stop hook
+# if completion notifications are already configured.
+
+[[hooks.SessionStart]]
+matcher = "startup|resume|clear|compact"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+timeout = 5
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+timeout = 5
+
+[[hooks.PermissionRequest]]
+
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+timeout = 5
+
+[[hooks.PreToolUse]]
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+timeout = 5
+
+[[hooks.PostToolUse]]
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+timeout = 5
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-finish-hook.mjs"
+timeout = 45
+statusMessage = "Sending Weixin completion notification"

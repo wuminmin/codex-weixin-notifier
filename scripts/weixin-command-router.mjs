@@ -8,6 +8,11 @@ import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { renderMarkdownImages, terminalSnapshotMarkdown } from "./markdown-image-renderer.mjs";
+import {
+  formatSystemStatus,
+  formatTaskOverview,
+  formatTaskProgress,
+} from "./codex-task-monitor.mjs";
 
 const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
 const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
@@ -1324,7 +1329,7 @@ function codexArgGroups(config) {
       }
       continue;
     }
-    if (arg === "--dangerously-bypass-approvals-and-sandbox") {
+    if (arg === "--dangerously-bypass-approvals-and-sandbox" || arg === "--dangerously-bypass-hook-trust") {
       globalArgs.push(arg);
       continue;
     }
@@ -1346,6 +1351,11 @@ function codexArgGroups(config) {
   }
   if (!bypassSandbox && !hasArg("--ask-for-approval", "-a")) {
     globalArgs.push("--ask-for-approval", "never");
+  }
+  const bypassHookTrust = process.env.CODEX_WEIXIN_CODEX_BYPASS_HOOK_TRUST === "1"
+    || config.codexBypassHookTrust === true;
+  if (bypassHookTrust && !globalArgs.includes("--dangerously-bypass-hook-trust")) {
+    globalArgs.push("--dangerously-bypass-hook-trust");
   }
 
   if (!configuredAnyArgs && execArgs.length === 0) {
@@ -2098,6 +2108,7 @@ function sendInteractiveInstruction(task, text, attachments, config, options = {
     replyConfig: options.replyConfig || config,
     args: options.args || {},
   });
+  if (options.suppressDispatchReply) return "";
   return [
     taskHeader(task.id, started ? "interactive 已启动并发送" : "interactive 已发送"),
     `会话: ${sessionName}`,
@@ -2849,6 +2860,9 @@ async function formatList(fromUser = "") {
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
   const taskKeyword = "(?:task|任务)";
+  if (/^任务$/u.test(trimmed)) return { type: "monitor-tasks" };
+  if (/^进度$/u.test(trimmed)) return { type: "monitor-progress" };
+  if (/^状态$/u.test(trimmed)) return { type: "monitor-status" };
   if (/^(?:list|列表|任务列表|列任务|查看任务)$/iu.test(trimmed)) return { type: "list" };
   if (/^(?:task|任务)\s+tmux\s+(?:clean|清理)$/iu.test(trimmed) || /^清理\s*tmux$/iu.test(trimmed)) {
     return { type: "tmux-clean" };
@@ -2877,6 +2891,9 @@ function parseCommand(text) {
 
 async function handleText(text, fromUser, config, options = {}) {
   const command = parseCommand(text);
+  if (command.type === "monitor-tasks") return formatTaskOverview(fromUser);
+  if (command.type === "monitor-progress") return formatTaskProgress(fromUser);
+  if (command.type === "monitor-status") return formatSystemStatus();
   if (command.type === "list") return formatList(fromUser);
   if (command.type === "tmux-clean") return cleanupLegacyTaskTmuxSessions({ dryRun: Boolean(config.dryRun) });
   if (command.type === "snapshot") return taskSnapshotResponse(getCurrentTask(fromUser), config);
@@ -2966,8 +2983,9 @@ async function runPoll(args, config) {
         const response = await handleTextWithAttachments(text, replyTarget, config, attachments, {
           replyConfig,
           args,
+          suppressDispatchReply: true,
         });
-        await sendTextWithMedia(response, replyConfig, args);
+        if (String(response || "").trim()) await sendTextWithMedia(response, replyConfig, args);
       } catch (error) {
         appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] ${error.stack || error.message}\n`);
         process.stderr.write(`${error.stack || error.message}\n`);

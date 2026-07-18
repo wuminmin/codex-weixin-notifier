@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { recordHookPayload } from "./codex-task-monitor.mjs";
 
 const NOTIFY = fileURLToPath(new URL("./notify-weixin.mjs", import.meta.url));
 const LOG = "/tmp/codex-weixin-notifier-hook.log";
@@ -167,6 +168,14 @@ function launchNotify(event) {
 
 try {
   const payload = await readStdinJson();
+  try {
+    recordHookPayload({ ...payload, hook_event_name: payload.hook_event_name || "Stop" });
+  } catch (error) {
+    appendHookLog({
+      code: "task-state-write-failed",
+      error: error.stack || error.message,
+    });
+  }
   launchNotify(normalizeStopPayload(payload));
 } catch (error) {
   appendHookLog({
