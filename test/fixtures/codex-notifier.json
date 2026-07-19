@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "defaults": {
+    "codexCwd": "/tmp",
+    "runner": "spawn",
+    "renderMarkdownImages": false,
+    "dryRun": true
+  },
+  "channels": {
+    "weixin": {
+      "accounts": {
+        "default": {
+          "bots": {
+            "default": {
+              "enabled": true,
+              "token": "test-token",
+              "toUser": "test-user",
+              "contextToken": "test-context",
+              "stateDir": "/tmp/codex-notifier-smoke/weixin-state",
+              "taskRoot": "/tmp/codex-notifier-smoke/weixin-tasks"
+            }
+          }
+        }
+      }
+    },
+    "feishu": {
+      "accounts": {
+        "a": {
+          "bots": {
+            "one": {
+              "enabled": true,
+              "appId": "cli_test",
+              "appSecret": "test-secret",
+              "stateDir": "/tmp/codex-notifier-smoke/feishu-state",
+              "taskRoot": "/tmp/codex-notifier-smoke/feishu-tasks",
+              "notifyTargets": [
+                { "id": "test", "chatId": "oc_test", "enabled": true }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { fileURLToPath } from "node:url";
 import { renderMarkdownImages, terminalSnapshotMarkdown } from "./markdown-image-renderer.mjs";
 import {
@@ -13,14 +14,24 @@ import {
   formatTaskOverview,
   formatTaskProgress,
 } from "./codex-task-monitor.mjs";
+import {
+  listBotConfigs,
+  loadNotifierConfig,
+  runtimeConfigForBot,
+  updateBotConfig,
+} from "./lib/notifier-config.mjs";
+import {
+  createFeishuChannel,
+  downloadFeishuResources,
+  feishuConversationKey,
+  feishuReplyConfig,
+  LocalMessageQueue,
+  MessageDeduplicator,
+  sendFeishuMarkdown,
+  sendFeishuMedia,
+} from "./lib/feishu-channel.mjs";
 
-const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
-const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
 const STATE_DIR = "~/.codex/weixin-notifier";
-const TASKS_PATH = `${STATE_DIR}/tasks.json`;
-const CURRENT_PATH = `${STATE_DIR}/current-task.json`;
-const SYNC_PATH = `${STATE_DIR}/command-sync.json`;
-const LOG_DIR = `${STATE_DIR}/logs`;
 const TASK_WORKSPACE_ROOT = "~/codex";
 const COMPAT_SYNC_PATH = "~/.codex/channels/wechat/sync_buf.json";
 const COMPAT_CONTEXT_TOKENS_PATH = "~/.codex/channels/wechat/context_tokens.json";
@@ -52,7 +63,8 @@ const DEFAULT_INTERACTIVE_WATCH_STATUS_INTERVAL_MS = 30 * 60 * 1000;
 const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
 const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
 const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 30000;
-let runtimeConfig = {};
+let fallbackRuntimeConfig = {};
+const runtimeContext = new AsyncLocalStorage();
 const interactiveWatchers = new Map();
 
 const EXTENSION_TO_MIME = {
@@ -83,6 +95,38 @@ const IMAGE_MIME_PREFIX = "image/";
 const MIME_TO_EXTENSION = Object.fromEntries(Object.entries(EXTENSION_TO_MIME).map(([ext, mime]) => [mime, ext]));
 
 const runtimeChildren = new Map();
+
+function currentRuntimeConfig() {
+  return runtimeContext.getStore() || fallbackRuntimeConfig;
+}
+
+export function withRuntimeConfig(config, callback) {
+  return runtimeContext.run(config, callback);
+}
+
+function stateDir(config = currentRuntimeConfig()) {
+  return expandHome(config.stateDir || STATE_DIR);
+}
+
+function tasksPath(config = currentRuntimeConfig()) {
+  return path.join(stateDir(config), "tasks.json");
+}
+
+function currentPath(config = currentRuntimeConfig()) {
+  return path.join(stateDir(config), "current-task.json");
+}
+
+function syncPath(config = currentRuntimeConfig()) {
+  return path.join(stateDir(config), "command-sync.json");
+}
+
+function logDir(config = currentRuntimeConfig()) {
+  return path.join(stateDir(config), "logs");
+}
+
+function runtimeMapKey(taskId, config = currentRuntimeConfig()) {
+  return `${config.namespace || "weixin/default/default"}:${taskId}`;
+}
 
 function expandHome(value) {
   if (!value) return value;
@@ -220,29 +264,6 @@ async function postJson({ baseUrl, endpoint, token, headers, body, timeoutMs = D
   }
 }
 
-function normalizeCompatAccount(account) {
-  if (!account || Object.keys(account).length === 0) return {};
-  return {
-    transport: "ilink-login",
-    baseUrl: account.baseUrl,
-    token: account.token,
-    botId: account.accountId,
-    userId: account.userId,
-    toUser: account.userId,
-  };
-}
-
-function loadConfig(args) {
-  const configPath = valueFrom(args.config, process.env.CODEX_WEIXIN_CONFIG, DEFAULT_CONFIG_PATH);
-  const config = {
-    ...normalizeCompatAccount(readJsonFile(COMPAT_ACCOUNT_PATH, {})),
-    ...readJsonFile(configPath, {}),
-    configPath,
-  };
-  runtimeConfig = config;
-  return config;
-}
-
 function isDryRun(args, config) {
   return args["dry-run"] === "true" || process.env.CODEX_WEIXIN_DRY_RUN === "1" || config.dryRun === true;
 }
@@ -253,6 +274,7 @@ function isFalseyConfig(value) {
 }
 
 function markdownImageRepliesEnabled(config) {
+  if (config.channel === "feishu") return false;
   if (process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES !== undefined) {
     return !isFalseyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
   }
@@ -283,8 +305,8 @@ function canSendMarkdownImage(config, args = {}) {
   return !valueFrom(config.endpoint, process.env.WEIXIN_ILINK_ENDPOINT);
 }
 
-function taskWorkspaceRoot() {
-  return expandHome(valueFrom(process.env.CODEX_WEIXIN_TASK_ROOT, TASK_WORKSPACE_ROOT));
+function taskWorkspaceRoot(config = currentRuntimeConfig()) {
+  return expandHome(valueFrom(config.taskRoot, process.env.CODEX_WEIXIN_TASK_ROOT, TASK_WORKSPACE_ROOT));
 }
 
 function taskDataDir(taskId) {
@@ -315,7 +337,7 @@ function realConfiguredPath(value) {
   return text;
 }
 
-function defaultCodexCwd(config = runtimeConfig) {
+function defaultCodexCwd(config = currentRuntimeConfig()) {
   const cwd = expandHome(valueFrom(
     realConfiguredPath(process.env.CODEX_WEIXIN_CODEX_CWD),
     realConfiguredPath(config.codexCwd),
@@ -328,7 +350,7 @@ function defaultCodexCwd(config = runtimeConfig) {
   return cwd;
 }
 
-function taskWorkingCwd(taskId, currentCwd = "", config = runtimeConfig) {
+function taskWorkingCwd(taskId, currentCwd = "", config = currentRuntimeConfig()) {
   if (!currentCwd || isLegacyTaskCwd(taskId, currentCwd)) return defaultCodexCwd(config);
   return expandHome(currentCwd);
 }
@@ -387,7 +409,7 @@ function clearTaskRunnerState(task) {
   task.tmuxAttach = "";
 }
 
-function normalizeOneTask(task, config = runtimeConfig) {
+function normalizeOneTask(task, config = currentRuntimeConfig()) {
   const normalized = {
     ...task,
     dataDir: ensureTaskDataDir(task.id),
@@ -400,14 +422,14 @@ function normalizeOneTask(task, config = runtimeConfig) {
     normalized.cwd = expandHome(normalized.cwd);
   }
   normalized.kind = String(normalized.id) === DEFAULT_TASK_ID ? "default" : normalized.kind || "task";
-  normalized.intent = normalized.intent || (String(normalized.id) === DEFAULT_TASK_ID ? "默认 Codex 助理" : `微信任务 task ${normalized.id}`);
+  normalized.intent = normalized.intent || (String(normalized.id) === DEFAULT_TASK_ID ? "默认 Codex 助理" : `${config.channel === "feishu" ? "飞书" : "微信"}任务 task ${normalized.id}`);
   normalized.status = normalized.status || (String(normalized.id) === DEFAULT_TASK_ID ? "default" : "ready");
   normalized.pendingInstructions = Array.isArray(normalized.pendingInstructions) ? normalized.pendingInstructions : [];
   if (normalized.alias && !isValidAlias(normalized.alias)) normalized.alias = "";
   return normalized;
 }
 
-function normalizeTasksState(state, config = runtimeConfig) {
+function normalizeTasksState(state, config = currentRuntimeConfig()) {
   const tasks = Array.isArray(state?.tasks) ? [...state.tasks] : [];
   let nextTaskId = Number(state?.nextTaskId || 1);
   if (!tasks.some((task) => String(task.id) === DEFAULT_TASK_ID)) {
@@ -433,13 +455,13 @@ function normalizeTasksState(state, config = runtimeConfig) {
   return { tasks, nextTaskId: Math.max(1, nextTaskId) };
 }
 
-function loadTasks(config = runtimeConfig) {
-  return normalizeTasksState(readJsonFile(TASKS_PATH, { tasks: [] }), config);
+function loadTasks(config = currentRuntimeConfig()) {
+  return normalizeTasksState(readJsonFile(tasksPath(config), { tasks: [] }), config);
 }
 
-function saveTasks(state, config = runtimeConfig) {
+function saveTasks(state, config = currentRuntimeConfig()) {
   const normalized = normalizeTasksState(state, config);
-  writeJsonFile(TASKS_PATH, {
+  writeJsonFile(tasksPath(config), {
     tasks: normalized.tasks,
     nextTaskId: normalized.nextTaskId,
     updatedAt: new Date().toISOString(),
@@ -448,11 +470,11 @@ function saveTasks(state, config = runtimeConfig) {
 }
 
 function loadCurrentTasks() {
-  return readJsonFile(CURRENT_PATH, { users: {} });
+  return readJsonFile(currentPath(), { users: {} });
 }
 
 function saveCurrentTasks(state) {
-  return writeJsonFile(CURRENT_PATH, {
+  return writeJsonFile(currentPath(), {
     users: state.users && typeof state.users === "object" ? state.users : {},
     updatedAt: new Date().toISOString(),
   });
@@ -527,12 +549,13 @@ function createTaskSlot(taskId, fromUser = "", options = {}) {
     return { ok: false, message: `task ${id}: 不存在。只能创建 task ${nextId} / 任务 ${nextId}，task id 必须每次加 1。` };
   }
 
-  const cwd = taskWorkingCwd(id, "", runtimeConfig);
+  const config = currentRuntimeConfig();
+  const cwd = taskWorkingCwd(id, "", config);
   const dataDir = ensureTaskDataDir(id);
   const task = {
     id,
     kind: "task",
-    intent: `微信任务 task ${id}`,
+    intent: `${config.channel === "feishu" ? "飞书" : "微信"}任务 task ${id}`,
     cwd,
     dataDir,
     status: "ready",
@@ -848,8 +871,12 @@ async function saveInboundMediaForTask(task, attachments, config) {
   const saved = [];
   const maxBytes = Number(valueFrom(config.maxMediaBytes, process.env.CODEX_WEIXIN_MAX_MEDIA_BYTES, MAX_MEDIA_BYTES));
   for (const attachment of attachments) {
-    const buffer = attachment.filePath ? fs.readFileSync(attachment.filePath) : await downloadInboundMedia(attachment, config);
-    if (buffer.length > maxBytes) throw new Error(`微信附件过大：${buffer.length} bytes > ${maxBytes} bytes`);
+    const buffer = attachment.filePath
+      ? fs.readFileSync(attachment.filePath)
+      : Buffer.isBuffer(attachment.buffer)
+        ? attachment.buffer
+        : await downloadInboundMedia(attachment, config);
+    if (buffer.length > maxBytes) throw new Error(`${config.channel === "feishu" ? "飞书" : "微信"}附件过大：${buffer.length} bytes > ${maxBytes} bytes`);
     const filePath = attachment.filePath ? path.resolve(attachment.filePath) : inboundFilePath(task, attachment);
     if (!attachment.filePath) fs.writeFileSync(filePath, buffer);
     const savedAttachment = {
@@ -865,7 +892,7 @@ async function saveInboundMediaForTask(task, attachments, config) {
       writeJsonFile(`${filePath}.json`, {
         ...savedAttachment,
         originalFileName: attachment.fileName || "",
-        source: attachment.url ? "url" : "cdn",
+        source: attachment.source || (attachment.url ? "url" : "cdn"),
         encrypted: Boolean(attachment.aesKey),
       });
     }
@@ -949,9 +976,10 @@ function getReplyTarget(message, config) {
 }
 
 function loadCommandSync() {
-  const commandSync = readJsonFile(SYNC_PATH, {});
+  const config = currentRuntimeConfig();
+  const commandSync = readJsonFile(syncPath(config), {});
   if (commandSync.get_updates_buf) return commandSync.get_updates_buf;
-  return readJsonFile(COMPAT_SYNC_PATH, {}).get_updates_buf || "";
+  return config.legacyStateCompat ? readJsonFile(COMPAT_SYNC_PATH, {}).get_updates_buf || "" : "";
 }
 
 function rememberRecipientContext(config, message, sync) {
@@ -959,8 +987,7 @@ function rememberRecipientContext(config, message, sync) {
   const contextToken = message?.context_token;
   if (!replyTarget || !contextToken) return;
 
-  const updated = {
-    ...readJsonFile(config.configPath, {}),
+  const binding = {
     toUser: replyTarget,
     contextToken,
     boundFromUser: message.from_user_id,
@@ -969,16 +996,21 @@ function rememberRecipientContext(config, message, sync) {
     boundText: extractText(message),
     boundAt: new Date().toISOString(),
   };
-  writeJsonFile(config.configPath, updated);
+  if (config.loadedNotifierConfig) {
+    updateBotConfig(config.loadedNotifierConfig, config, (current) => ({ ...current, ...binding }));
+  } else {
+    writeJsonFile(config.configPath, { ...readJsonFile(config.configPath, {}), ...binding });
+  }
   config.toUser = replyTarget;
   config.contextToken = contextToken;
 
-  const contextTokens = readJsonFile(COMPAT_CONTEXT_TOKENS_PATH, {});
-  contextTokens[replyTarget] = contextToken;
-  if (message.from_user_id) contextTokens[message.from_user_id] = contextToken;
-  writeJsonFile(COMPAT_CONTEXT_TOKENS_PATH, contextTokens);
-
-  writeJsonFile(COMPAT_SYNC_PATH, { get_updates_buf: sync || "", updatedAt: new Date().toISOString() });
+  if (config.legacyStateCompat) {
+    const contextTokens = readJsonFile(COMPAT_CONTEXT_TOKENS_PATH, {});
+    contextTokens[replyTarget] = contextToken;
+    if (message.from_user_id) contextTokens[message.from_user_id] = contextToken;
+    writeJsonFile(COMPAT_CONTEXT_TOKENS_PATH, contextTokens);
+    writeJsonFile(COMPAT_SYNC_PATH, { get_updates_buf: sync || "", updatedAt: new Date().toISOString() });
+  }
 }
 
 async function getUpdates(config, syncBuf) {
@@ -996,6 +1028,10 @@ async function getUpdates(config, syncBuf) {
 }
 
 async function sendText(text, config, args = {}) {
+  if (config.channel === "feishu") {
+    await sendFeishuMarkdown(text, config, { dryRun: isDryRun(args, config) });
+    return;
+  }
   if (isDryRun(args, config)) {
     process.stdout.write(`${text}\n`);
     return;
@@ -1214,6 +1250,11 @@ function mediaItemFromUpload(uploaded) {
 }
 
 async function sendMediaFile(filePath, config, args = {}) {
+  if (config.channel === "feishu") {
+    ensureMediaAllowed(filePath, config);
+    await sendFeishuMedia(filePath, config, { dryRun: isDryRun(args, config) });
+    return;
+  }
   if (isDryRun(args, config)) {
     const { filePath: resolved, stat } = ensureMediaAllowed(filePath, config);
     process.stdout.write(`[dry-run media] ${isImageFile(resolved) ? "image" : "file"} ${resolved} ${stat.size} bytes\n`);
@@ -1249,7 +1290,7 @@ async function sendMarkdownImageReply(text, config, args = {}) {
     return true;
   } catch (error) {
     appendTextFile(
-      path.join(LOG_DIR, "markdown-image-errors.log"),
+      path.join(logDir(config), "markdown-image-errors.log"),
       `[${new Date().toISOString()}] ${error.stack || error.message}\n`,
     );
     return false;
@@ -1417,7 +1458,8 @@ function sanitizeTmuxName(value) {
 }
 
 function makeTmuxSessionName(task, runId) {
-  return sanitizeTmuxName(`codex-wx-task-${task.id}`);
+  const config = currentRuntimeConfig();
+  return sanitizeTmuxName(`${config.tmuxPrefix || "codex-wx"}-task-${task.id}`);
 }
 
 function tmuxHasSession(sessionName) {
@@ -1455,7 +1497,8 @@ function listTmuxSessions() {
 }
 
 function isLegacyTaskTmuxSession(sessionName) {
-  return /^codex-wx-task-\d+-(?:wxrun|wxr)-/u.test(String(sessionName || ""));
+  const prefix = String(currentRuntimeConfig().tmuxPrefix || "codex-wx").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${prefix}-task-\\d+-(?:wxrun|wxr)-`, "u").test(String(sessionName || ""));
 }
 
 function cleanupLegacyTaskTmuxSessions(options = {}) {
@@ -1713,7 +1756,7 @@ async function taskSnapshotResponse(task, config) {
     return rendered.filePaths.map((filePath) => `MEDIA:${filePath}`).join("\n");
   } catch (error) {
     appendTextFile(
-      path.join(LOG_DIR, "markdown-image-errors.log"),
+      path.join(logDir(config), "markdown-image-errors.log"),
       `[${new Date().toISOString()}] task snap ${sessionName}: ${error.stack || error.message}\n`,
     );
     return [
@@ -1832,7 +1875,7 @@ async function sendWatcherText(text, config, args = {}) {
   try {
     await sendText(text, config, args);
   } catch (error) {
-    appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] watcher text send failed: ${error.stack || error.message}\n`);
+    appendTextFile(path.join(logDir(config), "router-errors.log"), `[${new Date().toISOString()}] watcher text send failed: ${error.stack || error.message}\n`);
   }
 }
 
@@ -1840,12 +1883,12 @@ async function sendWatcherTextWithMedia(text, config, args = {}) {
   try {
     await sendTextWithMedia(text, config, args);
   } catch (error) {
-    appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] watcher reply send failed: ${error.stack || error.message}\n`);
+    appendTextFile(path.join(logDir(config), "router-errors.log"), `[${new Date().toISOString()}] watcher reply send failed: ${error.stack || error.message}\n`);
   }
 }
 
 function stopInteractiveWatcher(taskId) {
-  const key = String(taskId);
+  const key = runtimeMapKey(taskId);
   const existing = interactiveWatchers.get(key);
   if (existing) existing.cancelled = true;
   interactiveWatchers.delete(key);
@@ -1859,6 +1902,9 @@ function persistInteractiveWatcher(taskId, watcher, replyConfig, previousCleaned
       previousCleaned,
       toUser: replyConfig?.toUser || "",
       contextToken: replyConfig?.contextToken || "",
+      chatId: replyConfig?.chatId || replyConfig?.toChat || "",
+      replyTo: replyConfig?.feishuReplyTo || "",
+      replyInThread: Boolean(replyConfig?.feishuReplyInThread),
       startedAt: new Date(watcher.startedAt).toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -1884,7 +1930,7 @@ function startInteractiveWatcher({ task, sessionName, previousCleaned, config, r
     startedAt,
     lastStatusAt: Date.now(),
   };
-  interactiveWatchers.set(taskId, watcher);
+  interactiveWatchers.set(runtimeMapKey(taskId, config), watcher);
   persistInteractiveWatcher(taskId, watcher, replyConfig || config, previousCleaned);
   runInteractiveWatcher(watcher, {
     task,
@@ -1894,7 +1940,7 @@ function startInteractiveWatcher({ task, sessionName, previousCleaned, config, r
     replyConfig: replyConfig || config,
     args,
   }).catch((error) => {
-    appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] interactive watcher failed: ${error.stack || error.message}\n`);
+    appendTextFile(path.join(logDir(config), "router-errors.log"), `[${new Date().toISOString()}] interactive watcher failed: ${error.stack || error.message}\n`);
   });
   return watcher;
 }
@@ -2017,9 +2063,10 @@ function ensureInteractiveSession(task, config, imagePaths = []) {
     "-c",
     task.cwd,
     "env",
-    `CODEX_SESSION_ID=weixin-task-${task.id}`,
-    "CODEX_PRODUCT=codex-weixin-command-router",
+    `CODEX_SESSION_ID=${config.channel}-task-${config.namespaceHash || "default"}-${task.id}`,
+    "CODEX_PRODUCT=codex-command-router",
     "CODEX_WEIXIN_ROUTER_TASK=1",
+    "CODEX_NOTIFIER_ROUTER_TASK=1",
     command,
     ...args,
   ];
@@ -2113,7 +2160,7 @@ function sendInteractiveInstruction(task, text, attachments, config, options = {
     taskHeader(task.id, started ? "interactive 已启动并发送" : "interactive 已发送"),
     `会话: ${sessionName}`,
     "",
-    "状态: 已进入后台等待，完成或需要选择时会自动发回微信。",
+    `状态: 已进入后台等待，完成或需要选择时会自动发回${config.channel === "feishu" ? "飞书" : "微信"}。`,
   ].join("\n");
 }
 
@@ -2122,10 +2169,12 @@ function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, 
   if (tmuxHasSession(sessionName)) killTmuxSession(sessionName);
   const keepOpen = process.env.CODEX_WEIXIN_KEEP_TMUX_OPEN === "1" || config.keepTmuxOpen === true;
   const shell = valueFrom(process.env.SHELL, "/bin/bash");
+  const channelLabel = config.channel === "feishu" ? "Feishu" : "Weixin";
   const envPrefix = [
-    ["CODEX_SESSION_ID", `weixin-task-${task.id}`],
-    ["CODEX_PRODUCT", "codex-weixin-command-router"],
+    ["CODEX_SESSION_ID", `${config.channel}-task-${config.namespaceHash || "default"}-${task.id}`],
+    ["CODEX_PRODUCT", "codex-command-router"],
     ["CODEX_WEIXIN_ROUTER_TASK", "1"],
+    ["CODEX_NOTIFIER_ROUTER_TASK", "1"],
   ].map(([key, value]) => `${key}=${shQuote(value)}`).join(" ");
   const codexLine = [envPrefix, shQuote(command), ...args.map(shQuote)].filter(Boolean).join(" ");
   const completionLine = [
@@ -2140,6 +2189,12 @@ function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, 
     '"$code"',
     "--config",
     shQuote(config.configPath),
+    "--channel",
+    shQuote(config.channel),
+    "--account",
+    shQuote(config.account),
+    "--bot",
+    shQuote(config.bot),
     ">>",
     shQuote(stderrPath),
     "2>&1",
@@ -2149,13 +2204,13 @@ function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, 
     `cd ${shQuote(task.cwd)} || exit 127`,
     `: > ${shQuote(stdoutPath)}`,
     `: > ${shQuote(stderrPath)}`,
-    `printf '%s\\n' ${shQuote(`Codex Weixin task ${task.id}`)}`,
+    `printf '%s\\n' ${shQuote(`Codex ${channelLabel} task ${task.id}`)}`,
     `printf '%s\\n' ${shQuote(`cwd: ${task.cwd}`)}`,
     `printf '%s\\n' ${shQuote(`logs: ${stdoutPath}`)}`,
     `${codexLine} > >(tee -a ${shQuote(stdoutPath)}) 2> >(tee -a ${shQuote(stderrPath)} >&2)`,
     "code=$?",
     completionLine,
-    `printf '\\n[Codex Weixin task ${task.id} finished with exit %s.]\\n' "$code"`,
+    `printf '\\n[Codex ${channelLabel} task ${task.id} finished with exit %s.]\\n' "$code"`,
     keepOpen ? "printf '[Attach remains open for inspection. Press Ctrl-D to close.]\\n'" : null,
     keepOpen ? `exec ${shQuote(shell)} -l` : "exit \"$code\"",
   ].filter(Boolean).join("\n");
@@ -2190,7 +2245,7 @@ function startTmuxRun({ task, config, resumeSessionId = "", resumeLast = false, 
 function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast = false, imagePaths = [] }) {
   const command = valueFrom(config.codexCommand, process.env.CODEX_WEIXIN_CODEX_COMMAND, "codex");
   const runId = createId(resumeSessionId ? "wxr" : "wxrun");
-  const logBase = expandHome(path.join(LOG_DIR, String(task.id), runId));
+  const logBase = expandHome(path.join(logDir(config), String(task.id), runId));
   fs.mkdirSync(logBase, { recursive: true });
   const stdoutPath = path.join(logBase, "stdout.jsonl");
   const stderrPath = path.join(logBase, "stderr.log");
@@ -2224,14 +2279,15 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
     cwd: task.cwd,
     env: {
       ...process.env,
-      CODEX_SESSION_ID: `weixin-task-${task.id}`,
-      CODEX_PRODUCT: "codex-weixin-command-router",
+      CODEX_SESSION_ID: `${config.channel}-task-${config.namespaceHash || "default"}-${task.id}`,
+      CODEX_PRODUCT: "codex-command-router",
       CODEX_WEIXIN_ROUTER_TASK: "1",
+      CODEX_NOTIFIER_ROUTER_TASK: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  runtimeChildren.set(String(task.id), child);
+  runtimeChildren.set(runtimeMapKey(task.id, config), child);
   writeTextFile(stdoutPath, "");
   writeTextFile(stderrPath, "");
 
@@ -2274,7 +2330,7 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
   });
 
   child.on("exit", async (code, signal) => {
-    runtimeChildren.delete(String(task.id));
+    runtimeChildren.delete(runtimeMapKey(task.id, config));
     try {
       await completeTask({ taskId: task.id, runId, exitCode: code, signal, config });
     } catch (error) {
@@ -2283,7 +2339,7 @@ function startCodexRun({ task, prompt, config, resumeSessionId = "", resumeLast 
   });
 
   child.on("error", (error) => {
-    runtimeChildren.delete(String(task.id));
+    runtimeChildren.delete(runtimeMapKey(task.id, config));
     updateTask(task.id, (current) => ({
       ...current,
       status: "failed",
@@ -2382,15 +2438,41 @@ function normalizeInstructionEntry(value) {
     return {
       text: String(value.text || "").trim(),
       attachments: Array.isArray(value.attachments) ? value.attachments : [],
+      fromUser: String(value.fromUser || ""),
+      replyContext: value.replyContext && typeof value.replyContext === "object" ? value.replyContext : {},
     };
   }
-  return { text: String(value || "").trim(), attachments: [] };
+  return { text: String(value || "").trim(), attachments: [], fromUser: "", replyContext: {} };
+}
+
+function serializableReplyContext(replyConfig = {}) {
+  return {
+    toUser: replyConfig.toUser || "",
+    contextToken: replyConfig.contextToken || "",
+    chatId: replyConfig.chatId || replyConfig.toChat || "",
+    replyTo: replyConfig.feishuReplyTo || "",
+    replyInThread: Boolean(replyConfig.feishuReplyInThread),
+  };
+}
+
+function configWithReplyContext(config, replyContext = {}) {
+  if (!replyContext || typeof replyContext !== "object") return config;
+  return {
+    ...config,
+    toUser: replyContext.toUser || config.toUser,
+    contextToken: replyContext.contextToken || config.contextToken,
+    toChat: replyContext.chatId || config.toChat,
+    chatId: replyContext.chatId || config.chatId,
+    feishuReplyTo: replyContext.replyTo || "",
+    feishuReplyInThread: Boolean(replyContext.replyInThread),
+  };
 }
 
 function formatAttachmentSummary(attachments = []) {
   if (!attachments.length) return "";
+  const sourceName = currentRuntimeConfig().channel === "feishu" ? "飞书" : "微信";
   return [
-    "微信附件已保存到本地：",
+    `${sourceName}附件已保存到本地：`,
     ...attachments.map((attachment, index) => {
       const label = isImageAttachment(attachment) ? "image" : "file";
       const size = attachment.size ? ` ${attachment.size} bytes` : "";
@@ -2402,31 +2484,34 @@ function formatAttachmentSummary(attachments = []) {
 }
 
 function instructionWithAttachments(instruction, attachments = []) {
-  const text = String(instruction || "").trim() || (attachments.length ? "请处理微信发来的附件。" : "");
+  const sourceName = currentRuntimeConfig().channel === "feishu" ? "飞书" : "微信";
+  const text = String(instruction || "").trim() || (attachments.length ? `请处理${sourceName}发来的附件。` : "");
   const summary = formatAttachmentSummary(attachments);
   return [text, summary].filter(Boolean).join("\n\n");
 }
 
 function formatDefaultTaskPrompt(instruction, attachments = []) {
   const userInstruction = instructionWithAttachments(instruction, attachments);
+  const channelName = currentRuntimeConfig().channel === "feishu" ? "Feishu" : "Weixin";
   return [
-    "You are task 0, the default Codex assistant behind a Weixin chat.",
+    `You are task 0, the default Codex assistant behind a ${channelName} chat.`,
     "Answer directly inside task 0. Do not create or request separate subtasks.",
-    "Task creation is controlled only by explicit Weixin commands such as task 1.",
-    "To send an existing local image or file to Weixin, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
+    `Task creation is controlled only by explicit ${channelName} commands such as task 1.`,
+    `To send an existing local image or file to ${channelName}, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file`,
     "Use MEDIA only for files that already exist and are safe to share. Keep the directive on a separate line.",
     "",
-    "Weixin user message:",
+    `${channelName} user message:`,
     userInstruction,
   ].join("\n");
 }
 
 function formatAppendPrompt(task, instruction, attachments = []) {
   const userInstruction = instructionWithAttachments(instruction, attachments);
+  const channelName = currentRuntimeConfig().channel === "feishu" ? "Feishu" : "Weixin";
   if (String(task.id) === DEFAULT_TASK_ID) return formatDefaultTaskPrompt(instruction, attachments);
   if (!task.codexSessionId && !task.resumeLast) {
     return [
-      `You are Weixin-managed task ${task.id}.`,
+      `You are ${channelName}-managed task ${task.id}.`,
       task.alias ? `Task alias: ${task.alias}` : null,
       `Working directory: ${task.cwd}`,
       "",
@@ -2440,7 +2525,7 @@ function formatAppendPrompt(task, instruction, attachments = []) {
     `Continue the existing task ${task.id}.`,
     `Original task: ${task.intent}`,
     "",
-    "Additional instruction from Weixin:",
+    `Additional instruction from ${channelName}:`,
     userInstruction,
     "",
     "If your answer needs to send an existing local image or file, put a MEDIA directive on its own line: MEDIA:/absolute/path/to/file",
@@ -2490,7 +2575,7 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
     if (latest.tmuxSession) lines.push(`tmux: ${latest.tmuxSession}`);
   }
   if (last) lines.push("", compactLines(last, 1200));
-  await sendTextWithMedia(lines.join("\n"), config);
+  await sendTextWithMedia(lines.join("\n"), configWithReplyContext(config, latest.activeReplyContext));
   return latest;
 }
 
@@ -2505,6 +2590,12 @@ function forwardToTask(task, text, config, fromUser = "", attachments = [], opti
   if (selectedRunner(config) === "interactive") {
     const answeredQuestion = answerInteractiveQuestion(task, instruction, config, options);
     if (answeredQuestion) return answeredQuestion;
+    task = updateTask(task.id, (current) => ({
+      ...current,
+      fromUser: fromUser || current.fromUser || "",
+      activeReplyContext: serializableReplyContext(options.replyConfig || config),
+      updatedAt: new Date().toISOString(),
+    })) || task;
     return sendInteractiveInstruction(task, instruction, attachments, config, options);
   }
 
@@ -2512,6 +2603,8 @@ function forwardToTask(task, text, config, fromUser = "", attachments = [], opti
     id: createId("inst"),
     text: instruction,
     attachments,
+    fromUser,
+    replyContext: serializableReplyContext(options.replyConfig || config),
     addedAt: new Date().toISOString(),
   };
 
@@ -2590,9 +2683,9 @@ function closeTaskTargets(targets, fromUser = "", options = {}) {
     try {
       if (task.runner === "tmux" || task.tmuxSession) {
         killed = killTmuxSession(task.tmuxSession);
-      } else if (runtimeChildren.has(String(task.id))) {
-        runtimeChildren.get(String(task.id)).kill("SIGTERM");
-        runtimeChildren.delete(String(task.id));
+      } else if (runtimeChildren.has(runtimeMapKey(task.id))) {
+        runtimeChildren.get(runtimeMapKey(task.id)).kill("SIGTERM");
+        runtimeChildren.delete(runtimeMapKey(task.id));
         killed = true;
       } else if (task.pid) {
         try {
@@ -2690,8 +2783,16 @@ function refreshTaskLiveness(task) {
 
 function startInstructionForTask(task, instructionEntry, config) {
   const entry = normalizeInstructionEntry(instructionEntry);
+  task = updateTask(task.id, (current) => ({
+    ...current,
+    fromUser: entry.fromUser || current.fromUser || "",
+    activeReplyContext: entry.replyContext,
+    updatedAt: new Date().toISOString(),
+  })) || task;
   if (selectedRunner(config) === "interactive") {
-    sendInteractiveInstruction(task, entry.text, entry.attachments, config);
+    sendInteractiveInstruction(task, entry.text, entry.attachments, config, {
+      replyConfig: configWithReplyContext(config, entry.replyContext),
+    });
     return;
   }
   const imagePaths = imagePathsFromAttachments(entry.attachments);
@@ -2760,7 +2861,7 @@ function restartActiveTaskSessionsOnRouterStart(config, args = {}) {
       const session = ensureInteractiveSession(prepared || task, config);
       restarted.push({ id: String(task.id), sessionName: session.sessionName, killed });
     } catch (error) {
-      appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] restart task ${task.id} failed: ${error.stack || error.message}\n`);
+      appendTextFile(path.join(logDir(config), "router-errors.log"), `[${new Date().toISOString()}] restart task ${task.id} failed: ${error.stack || error.message}\n`);
       updateTask(task.id, (current) => ({
         ...current,
         status: "unknown",
@@ -2818,6 +2919,10 @@ function resumePersistedInteractiveWatchers(config, args = {}) {
       ...config,
       toUser: watch.toUser || config.toUser,
       contextToken: watch.contextToken || config.contextToken,
+      toChat: watch.chatId || config.toChat,
+      chatId: watch.chatId || config.chatId,
+      feishuReplyTo: watch.replyTo || "",
+      feishuReplyInThread: Boolean(watch.replyInThread),
     };
     startInteractiveWatcher({
       task,
@@ -2857,6 +2962,29 @@ async function formatList(fromUser = "") {
   return ordered.map((task) => formatTaskBlock(task, fromUser)).join("\n\n");
 }
 
+function formatChannelProgress(fromUser = "") {
+  const active = pruneDeadTasks().tasks.filter((task) => isTaskActive(task));
+  if (active.length === 0) return `${currentRuntimeConfig().namespace} · 当前没有运行中任务`;
+  return active.map((task) => formatTaskBlock(task, fromUser)).join("\n\n");
+}
+
+function formatChannelStatus() {
+  const config = currentRuntimeConfig();
+  const tasks = pruneDeadTasks().tasks;
+  const active = tasks.filter((task) => isTaskActive(task)).length;
+  const persisted = readJsonFile(path.join(stateDir(config), "channel-status.json"), {});
+  const connection = config.channel === "feishu"
+    ? config.feishuChannel?.getConnectionStatus?.()?.state || persisted.status || (config.feishuChannel ? "connected" : "outbound-only")
+    : "polling";
+  return [
+    `${config.namespace} · 状态`,
+    `连接: ${connection}`,
+    `任务: ${tasks.length}（运行中 ${active}）`,
+    `状态目录: ${config.stateDir}`,
+    `任务目录: ${config.taskRoot}`,
+  ].join("\n");
+}
+
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
   const taskKeyword = "(?:task|任务)";
@@ -2891,9 +3019,9 @@ function parseCommand(text) {
 
 async function handleText(text, fromUser, config, options = {}) {
   const command = parseCommand(text);
-  if (command.type === "monitor-tasks") return formatTaskOverview(fromUser);
-  if (command.type === "monitor-progress") return formatTaskProgress(fromUser);
-  if (command.type === "monitor-status") return formatSystemStatus();
+  if (command.type === "monitor-tasks") return config.channel === "weixin" ? formatTaskOverview(fromUser) : formatList(fromUser);
+  if (command.type === "monitor-progress") return config.channel === "weixin" ? formatTaskProgress(fromUser) : formatChannelProgress(fromUser);
+  if (command.type === "monitor-status") return config.channel === "weixin" ? formatSystemStatus() : formatChannelStatus();
   if (command.type === "list") return formatList(fromUser);
   if (command.type === "tmux-clean") return cleanupLegacyTaskTmuxSessions({ dryRun: Boolean(config.dryRun) });
   if (command.type === "snapshot") return taskSnapshotResponse(getCurrentTask(fromUser), config);
@@ -2933,7 +3061,7 @@ async function sendInboundHeartbeat(text, fromUser, config, args = {}, attachmen
   try {
     await sendText(heartbeat, config, args);
   } catch (error) {
-    appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] heartbeat failed: ${error.stack || error.message}\n`);
+    appendTextFile(path.join(logDir(config), "router-errors.log"), `[${new Date().toISOString()}] heartbeat failed: ${error.stack || error.message}\n`);
   }
 }
 
@@ -2965,7 +3093,7 @@ async function runPoll(args, config) {
   while (true) {
     const updates = await getUpdates(config, sync);
     sync = updates.get_updates_buf || sync;
-    writeJsonFile(SYNC_PATH, { get_updates_buf: sync, updatedAt: new Date().toISOString() });
+    writeJsonFile(syncPath(config), { get_updates_buf: sync, updatedAt: new Date().toISOString() });
     for (const message of updates.msgs || []) {
       try {
         if (!isInboundUserMessage(message)) continue;
@@ -2987,7 +3115,7 @@ async function runPoll(args, config) {
         });
         if (String(response || "").trim()) await sendTextWithMedia(response, replyConfig, args);
       } catch (error) {
-        appendTextFile(path.join(LOG_DIR, "router-errors.log"), `[${new Date().toISOString()}] ${error.stack || error.message}\n`);
+        appendTextFile(path.join(logDir(config), "router-errors.log"), `[${new Date().toISOString()}] ${error.stack || error.message}\n`);
         process.stderr.write(`${error.stack || error.message}\n`);
       }
     }
@@ -2995,51 +3123,254 @@ async function runPoll(args, config) {
   }
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const config = loadConfig(args);
+function initializeRuntime(args, config) {
   config.dryRun = isDryRun(args, config);
-
-  if (args["send-media"]) {
-    await sendTextWithMedia(`${args.message || ""}\nMEDIA:${args["send-media"]}`.trim(), config, args);
-    return;
-  }
-
+  fallbackRuntimeConfig = config;
   saveTasks(loadTasks());
-  if (args["complete-task"] === "true") {
-    await completeTask({
-      taskId: valueFrom(args["task-id"], args.task),
-      runId: args["run-id"] || "",
-      exitCode: args["exit-code"],
-      signal: args.signal || "",
-      config,
-    });
-    return;
-  }
-  if (args.list === "true") {
-    process.stdout.write(`${await formatList()}\n`);
-    return;
-  }
-  if (args.once === "true") {
-    await runOnce(args, config);
-    return;
-  }
   const restarted = restartActiveTaskSessionsOnRouterStart(config, args);
   if (restarted.length > 0) {
-    process.stdout.write(`Restarted task sessions: ${restarted.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
+    process.stdout.write(`[${config.namespace}] Restarted task sessions: ${restarted.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
   }
   const recovered = recoverStaleTaskQueues(config);
   if (recovered.length > 0) {
-    process.stdout.write(`Recovered stale queued tasks: ${recovered.join(", ")}\n`);
+    process.stdout.write(`[${config.namespace}] Recovered stale queued tasks: ${recovered.join(", ")}\n`);
   }
   const resumedWatchers = resumePersistedInteractiveWatchers(config, args);
   if (resumedWatchers.length > 0) {
-    process.stdout.write(`Resumed interactive watchers: ${resumedWatchers.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
+    process.stdout.write(`[${config.namespace}] Resumed interactive watchers: ${resumedWatchers.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
   }
-  await runPoll(args, config);
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error.stack || error.message}\n`);
-  process.exit(1);
-});
+function appendRouterError(config, message) {
+  appendTextFile(path.join(logDir(config), "router-errors.log"), `[${new Date().toISOString()}] ${message}\n`);
+}
+
+function writeChannelStatus(config, status, details = {}) {
+  writeJsonFile(path.join(stateDir(config), "channel-status.json"), {
+    channel: config.channel,
+    account: config.account,
+    bot: config.bot,
+    namespace: config.namespace,
+    status,
+    ...details,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function processFeishuMessage(message, config, channel, args) {
+  const conversation = feishuConversationKey(message);
+  const replyConfig = feishuReplyConfig(config, message);
+  const attachments = await downloadFeishuResources(message, channel);
+  const text = String(message.content || "").trim();
+  if (!text && attachments.length === 0) return;
+  await sendInboundHeartbeat(text, conversation, replyConfig, args, attachments);
+  const response = await handleTextWithAttachments(text, conversation, config, attachments, {
+    replyConfig,
+    args,
+    suppressDispatchReply: true,
+  });
+  if (String(response || "").trim()) await sendTextWithMedia(response, replyConfig, args);
+}
+
+export async function startFeishuBot(config, args = {}, options = {}) {
+  const channel = options.channel || createFeishuChannel(config, { sdk: options.sdk });
+  const queue = new LocalMessageQueue();
+  const dedup = new MessageDeduplicator();
+  config.feishuChannel = channel;
+  writeChannelStatus(config, "connecting");
+  channel.on("message", (message) => {
+    if (!dedup.accept(message.messageId)) return;
+    queue.enqueue(message.chatId, () => withRuntimeConfig(config, async () => {
+      try {
+        await processFeishuMessage(message, config, channel, args);
+      } catch (error) {
+        appendRouterError(config, `Feishu message ${message.messageId}: ${error.stack || error.message}`);
+        process.stderr.write(`[${config.namespace}] ${error.stack || error.message}\n`);
+        try {
+          await sendFeishuMarkdown(`消息处理失败：${error.message}`, feishuReplyConfig(config, message));
+        } catch (replyError) {
+          appendRouterError(config, `Feishu error reply failed: ${replyError.stack || replyError.message}`);
+        }
+      }
+    }));
+  });
+  channel.on("reject", (event) => {
+    appendRouterError(config, `Feishu message rejected: ${event.messageId} reason=${event.reason}`);
+  });
+  channel.on("error", (error) => {
+    appendRouterError(config, `Feishu channel error (${error.code || "unknown"}): ${error.stack || error.message}`);
+    writeChannelStatus(config, "error", { code: error.code || "unknown", error: error.message });
+  });
+  channel.on("reconnecting", () => {
+    writeChannelStatus(config, "reconnecting");
+    process.stderr.write(`[${config.namespace}] Feishu reconnecting\n`);
+  });
+  channel.on("reconnected", () => {
+    writeChannelStatus(config, "connected", { reconnect: true });
+    process.stdout.write(`[${config.namespace}] Feishu reconnected\n`);
+  });
+  try {
+    await channel.connect();
+  } catch (error) {
+    writeChannelStatus(config, "startup-failed", { code: error.code || "unknown", error: error.message });
+    throw error;
+  }
+  writeChannelStatus(config, "connected", {
+    botName: channel.botIdentity?.name || config.bot,
+    botOpenId: channel.botIdentity?.openId || "",
+  });
+  process.stdout.write(`[${config.namespace}] Feishu connected as ${channel.botIdentity?.name || config.bot}\n`);
+  return { channel, queue, config };
+}
+
+function loadSelectedRuntimeConfigs(args, options = {}) {
+  const loaded = loadNotifierConfig({
+    configPath: valueFrom(args.config, process.env.CODEX_NOTIFIER_CONFIG, process.env.CODEX_WEIXIN_CONFIG),
+  });
+  const channel = args.channel || (options.allChannels ? "" : options.defaultChannel || "weixin");
+  const matches = listBotConfigs(loaded, {
+    channel,
+    account: args.account,
+    bot: args.bot,
+  });
+  const configs = matches.map((item) => {
+    const config = runtimeConfigForBot(item, { home: loaded.home });
+    config.loadedNotifierConfig = loaded;
+    return config;
+  });
+  const feishuApps = new Map();
+  for (const config of configs.filter((item) => item.channel === "feishu" && item.appId)) {
+    if (feishuApps.has(config.appId)) {
+      config.startupError = `Feishu appId ${config.appId} is already assigned to ${feishuApps.get(config.appId)}; each application may have only one long connection.`;
+    } else {
+      feishuApps.set(config.appId, config.namespace);
+    }
+  }
+  return configs;
+}
+
+async function runSingleMode(args, config) {
+  return withRuntimeConfig(config, async () => {
+    config.dryRun = isDryRun(args, config);
+    fallbackRuntimeConfig = config;
+    if (args["send-media"]) {
+      await sendTextWithMedia(`${args.message || ""}\nMEDIA:${args["send-media"]}`.trim(), config, args);
+      return true;
+    }
+
+    saveTasks(loadTasks());
+    if (args["complete-task"] === "true") {
+      await completeTask({
+        taskId: valueFrom(args["task-id"], args.task),
+        runId: args["run-id"] || "",
+        exitCode: args["exit-code"],
+        signal: args.signal || "",
+        config,
+      });
+      return true;
+    }
+    if (args.list === "true") {
+      process.stdout.write(`${await formatList()}\n`);
+      return true;
+    }
+    if (args.once === "true") {
+      await runOnce(args, config);
+      return true;
+    }
+    return false;
+  });
+}
+
+export async function runRouterCli(argv = process.argv.slice(2), options = {}) {
+  const args = parseArgs(argv);
+  const configs = loadSelectedRuntimeConfigs(args, options);
+  if (configs.length === 0) {
+    throw new Error("No enabled notifier channels matched the requested selectors.");
+  }
+
+  const singleMode = args["send-media"] || args["complete-task"] === "true" || args.list === "true" || args.once === "true";
+  if (singleMode) {
+    if (configs.length !== 1) throw new Error("This command requires exactly one bot; specify --channel, --account, and --bot.");
+    await runSingleMode(args, configs[0]);
+    return;
+  }
+
+  for (const config of configs) {
+    if (config.startupError) continue;
+    await withRuntimeConfig(config, async () => initializeRuntime(args, config));
+  }
+
+  const liveRuntimes = [];
+  const starts = configs.map((config) => withRuntimeConfig(config, async () => {
+    if (config.startupError) throw new Error(config.startupError);
+    if (config.channel === "weixin") {
+      const poll = runPoll(args, config).then(
+        () => ({ ok: true }),
+        (error) => {
+          appendRouterError(config, error.stack || error.message);
+          process.stderr.write(`[${config.namespace}] ${error.stack || error.message}\n`);
+          return { ok: false, error };
+        },
+      );
+      const runtime = { config, poll };
+      liveRuntimes.push(runtime);
+      return runtime;
+    }
+    if (config.channel === "feishu") {
+      const runtime = await startFeishuBot(config, args, options);
+      liveRuntimes.push(runtime);
+      return runtime;
+    }
+    throw new Error(`Unsupported notifier channel: ${config.channel}`);
+  }));
+  const settled = await Promise.allSettled(starts);
+  for (let index = 0; index < settled.length; index += 1) {
+    if (settled[index].status === "rejected") {
+      const config = configs[index];
+      const error = settled[index].reason;
+      appendRouterError(config, `Channel startup failed: ${error.stack || error.message}`);
+      writeChannelStatus(config, "startup-failed", { error: error.message });
+      process.stderr.write(`[${config.namespace}] startup failed: ${error.stack || error.message}\n`);
+    }
+  }
+  if (liveRuntimes.length === 0) throw new Error("All notifier channels failed to start.");
+
+  const shutdown = async () => {
+    await Promise.allSettled(liveRuntimes.map(async (runtime) => {
+      await runtime.queue?.drain?.();
+      await runtime.channel?.disconnect?.();
+    }));
+  };
+  process.once("SIGINT", () => shutdown().finally(() => process.exit(0)));
+  process.once("SIGTERM", () => shutdown().finally(() => process.exit(0)));
+  const feishuRuntimes = liveRuntimes.filter((runtime) => runtime.config.channel === "feishu");
+  const weixinRuntimes = liveRuntimes.filter((runtime) => runtime.config.channel === "weixin");
+  if (feishuRuntimes.length === 0 && weixinRuntimes.length === 1) {
+    const result = await weixinRuntimes[0].poll;
+    if (!result.ok) throw result.error;
+    return;
+  }
+  await new Promise(() => {});
+}
+
+export const taskCoreForTests = {
+  configWithReplyContext,
+  createTaskSlot,
+  enterTask,
+  getCurrentTask,
+  handleText,
+  loadCurrentTasks,
+  loadTasks,
+  makeTmuxSessionName,
+  saveTasks,
+  serializableReplyContext,
+  setCurrentTask,
+};
+
+const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(SCRIPT_PATH);
+if (invokedDirectly) {
+  runRouterCli(process.argv.slice(2), { defaultChannel: "weixin" }).catch((error) => {
+    process.stderr.write(`${error.stack || error.message}\n`);
+    process.exit(1);
+  });
+}

@@ -5,10 +5,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { renderMarkdownImages } from "./markdown-image-renderer.mjs";
+import {
+  listBotConfigs,
+  loadNotifierConfig,
+  runtimeConfigForBot,
+} from "./lib/notifier-config.mjs";
 
-const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
-const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
 const DEFAULT_TIMEOUT_MS = 8000;
 const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
 const ILINK_APP_ID = "bot";
@@ -129,7 +133,7 @@ function stableSessionId(event, args) {
   return crypto.createHash("sha256").update(seed).digest("hex").slice(0, 12);
 }
 
-function normalizeEvent(event, args) {
+export function normalizeEvent(event, args) {
   const status = valueFrom(args.status, event.status, event.result, "completed");
   const workspace = valueFrom(args.workspace, event.workspace, event.cwd, process.env.PWD, process.cwd());
   const task = valueFrom(args.task, event.task, event.prompt, event.title, "Codex task");
@@ -174,7 +178,7 @@ function shouldShowWorkspace(event) {
   return !samePathValue(event.task, workspace);
 }
 
-function formatMessage(event, config) {
+export function formatMessage(event, config) {
   const maxSummaryLength = Number(config.maxSummaryLength || 800);
   const summary = event.summary.length > maxSummaryLength
     ? `${event.summary.slice(0, maxSummaryLength)}...`
@@ -511,27 +515,17 @@ async function trySendMarkdownImageNotification(message, event, config, args) {
   }
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const stdinEvent = await readEventJson(args);
-  const configPath = valueFrom(args.config, process.env.CODEX_WEIXIN_CONFIG, DEFAULT_CONFIG_PATH);
-  const config = {
-    ...normalizeCompatAccount(readJsonFile(COMPAT_ACCOUNT_PATH)),
-    ...readJsonFile(configPath),
-    dryRun: args["dry-run"] === "true" || process.env.CODEX_WEIXIN_DRY_RUN === "1",
-  };
-
-  const event = normalizeEvent(stdinEvent, args);
+export async function sendWeixinNotification(event, config, args = {}) {
   const message = formatMessage(event, config);
 
   if (await trySendMarkdownImageNotification(message, event, config, args)) {
     if (!config.dryRun) process.stdout.write(`Sent Weixin image notification for session ${event.sessionId}\n`);
-    return;
+    return { ok: true, transport: "image", message };
   }
 
   if (config.dryRun) {
     process.stdout.write(`${message}\n`);
-    return;
+    return { ok: true, transport: "dry-run", message };
   }
 
   const { endpoint, headers, body } = config.endpoint || process.env.WEIXIN_ILINK_ENDPOINT
@@ -540,21 +534,38 @@ async function main() {
   const timeoutMs = Number(valueFrom(args.timeout, config.timeoutMs, DEFAULT_TIMEOUT_MS));
   await postJson(endpoint, headers, body, timeoutMs);
   process.stdout.write(`Sent Weixin notification for session ${event.sessionId}\n`);
+  return { ok: true, transport: "text", message };
 }
 
-function normalizeCompatAccount(account) {
-  if (!account || Object.keys(account).length === 0) return {};
-  return {
-    transport: "ilink-login",
-    baseUrl: account.baseUrl,
-    token: account.token,
-    botId: account.accountId,
-    userId: account.userId,
-    toUser: account.userId,
+export async function runWeixinNotifier(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  const stdinEvent = await readEventJson(args);
+  const loaded = loadNotifierConfig({
+    configPath: valueFrom(args.config, process.env.CODEX_NOTIFIER_CONFIG, process.env.CODEX_WEIXIN_CONFIG),
+  });
+  let matches = listBotConfigs(loaded, {
+    channel: "weixin",
+    account: args.account,
+    bot: args.bot,
+  });
+  if (matches.length > 1 && !args.account && !args.bot) {
+    matches = matches.filter((item) => item.account === "default" && item.bot === "default");
+  }
+  if (matches.length !== 1) throw new Error(`Expected one enabled Weixin bot, found ${matches.length}.`);
+  const config = {
+    ...runtimeConfigForBot(matches[0], { home: loaded.home }),
+    dryRun: args["dry-run"] === "true" || process.env.CODEX_WEIXIN_DRY_RUN === "1",
   };
+
+  const event = normalizeEvent(stdinEvent, args);
+  return sendWeixinNotification(event, config, args);
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error.stack || error.message}\n`);
-  process.exit(1);
-});
+const scriptPath = fileURLToPath(import.meta.url);
+const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(scriptPath);
+if (invokedDirectly) {
+  runWeixinNotifier().catch((error) => {
+    process.stderr.write(`${error.stack || error.message}\n`);
+    process.exit(1);
+  });
+}

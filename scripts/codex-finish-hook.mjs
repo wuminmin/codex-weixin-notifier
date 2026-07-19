@@ -8,11 +8,11 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { recordHookPayload } from "./codex-task-monitor.mjs";
 
-const NOTIFY = fileURLToPath(new URL("./notify-weixin.mjs", import.meta.url));
+const NOTIFY = fileURLToPath(new URL("./notify.mjs", import.meta.url));
 const LOG = "/tmp/codex-weixin-notifier-hook.log";
 const HOOK_DIR = path.join(os.tmpdir(), "codex-weixin-notifier-hooks");
 
-if (process.env.CODEX_WEIXIN_ROUTER_TASK === "1") {
+if (process.env.CODEX_WEIXIN_ROUTER_TASK === "1" || process.env.CODEX_NOTIFIER_ROUTER_TASK === "1") {
   process.exit(0);
 }
 

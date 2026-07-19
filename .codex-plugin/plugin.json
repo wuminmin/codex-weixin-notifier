@@ -1,15 +1,15 @@
 {
   "name": "codex-weixin-notifier",
-  "version": "0.1.2",
-  "description": "Send Weixin notifications and route numbered Codex tasks from Weixin.",
+  "version": "0.2.0",
+  "description": "Send Weixin and Feishu notifications and route isolated numbered Codex tasks from multiple bots.",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "Codex Weixin Notifier",
-    "shortDescription": "Notify Weixin and route numbered Codex tasks.",
-    "longDescription": "Adds a local Weixin/iLink workflow for Codex notifications plus a numbered task router where list shows tasks, task N switches the current Codex process, and ordinary Weixin text is forwarded to that task.",
+    "displayName": "Codex Weixin & Feishu Notifier",
+    "shortDescription": "Notify Weixin/Feishu and route isolated Codex tasks.",
+    "longDescription": "Adds Weixin/iLink and multi-account Feishu application-bot workflows for Codex completion notifications, media, and isolated numbered task routing.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [
@@ -20,8 +20,9 @@
     ],
     "defaultPrompt": [
       "Help me configure Weixin completion notifications.",
+      "Configure a Feishu application bot for Codex tasks.",
       "Send a test Codex completion notification.",
-      "Start the Weixin task router."
+      "Start the notifier channel router."
     ],
     "brandColor": "#18A058"
   }

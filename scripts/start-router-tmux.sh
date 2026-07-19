@@ -5,7 +5,7 @@ SESSION_NAME="${CODEX_WEIXIN_ROUTER_SESSION:-codex-wx-router}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DEFAULT_PLUGIN_DIR="$(dirname -- "$SCRIPT_DIR")"
 PLUGIN_DIR="${CODEX_WEIXIN_PLUGIN_DIR:-$DEFAULT_PLUGIN_DIR}"
-ROUTER_SCRIPT="${CODEX_WEIXIN_ROUTER_SCRIPT:-scripts/weixin-command-router.mjs}"
+ROUTER_SCRIPT="${CODEX_WEIXIN_ROUTER_SCRIPT:-scripts/codex-command-router.mjs}"
 NODE_BIN="${CODEX_WEIXIN_NODE:-node}"
 STATE_DIR="${CODEX_WEIXIN_STATE_DIR:-$HOME/.codex/weixin-notifier}"
 PID_FILE="$STATE_DIR/router.pid"
@@ -28,7 +28,7 @@ while [ "$#" -gt 0 ]; do
       cat <<EOF
 Usage: $0 [--quiet] [--restart] [--no-restart-tasks]
 
-Starts the Codex Weixin router in tmux.
+Starts the Codex notifier channel router (Weixin and Feishu) in tmux.
 
 Options:
   --quiet     Suppress status output.

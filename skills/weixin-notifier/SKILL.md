@@ -1,18 +1,25 @@
 ---
 name: weixin-notifier
-description: Configure and test Codex Weixin notifications and Weixin-driven task commands through Tencent iLink/OpenClaw-style bot delivery.
+description: Configure and test Codex Weixin or Feishu notifications, multi-account Feishu application bots, and channel-driven task commands.
 ---
 
-# Weixin Notifier
+# Weixin & Feishu Notifier
 
-Use this skill when the user wants Codex to pair Weixin by QR code, notify Weixin after a task finishes, start Codex work from Weixin, list numbered tasks, or switch the current Weixin-managed Codex task.
+Use this skill when the user wants Codex to pair Weixin, configure one or more Feishu application bots, send completion notifications through either channel, start Codex work from chat, list numbered tasks, or switch the current chat-managed Codex task.
 
 ## Design
 
-The plugin separates the completion event from the Weixin transport:
+The plugin separates a shared task/notification core from channel transports:
+
+- `scripts/codex-command-router.mjs` starts all enabled Weixin and Feishu adapters in one process.
+- `scripts/notify.mjs` fans completion events out to the configured Weixin destination and all enabled Feishu `notifyTargets`; a per-target failure does not stop the remaining sends, but makes the final exit status nonzero.
+- `~/.codex/codex-notifier.json` is the general config. Explicit `--config` / `CODEX_NOTIFIER_CONFIG` wins, followed by the general config, then the legacy Weixin config.
+- Legacy `~/.codex/weixin-notifier.json` is mapped in place to `weixin/default/default`; no key or state migration is required.
+- Each Feishu `{account, bot}` owns an independent task list, task 0, attachment tree, state namespace, and stable-hash tmux prefix. Conversations inside that bot share its task pool, while the selected current task is stored by `chatId`.
+- Feishu uses the official `@larksuiteoapi/node-sdk` Channel for WebSocket reconnect, group `@bot` policy, message normalization, deduplication, per-chat ordering, native Markdown splitting, reply/thread context, and media transfer.
 
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
-- `scripts/notify-weixin.mjs` is the single sender for CLI, VS Code, shell wrappers, and future Codex hooks. It renders completion notifications as terminal-style long PNG images by default; set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies.
+- `scripts/notify-weixin.mjs` is the Weixin-only compatibility sender. It renders completion notifications as terminal-style long PNG images by default; set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies.
 - `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N` / `任务 N`, and forwards ordinary text to the selected task's interactive tmux Codex session.
 - `scripts/codex-task-state-hook.mjs` and `scripts/codex-task-monitor.mjs` maintain a model-free local status registry for WSL CLI, VS Code Codex, and Weixin-managed tmux tasks. Exact `任务`, `进度`, and `状态` commands read it directly.
 - `scripts/weixin-command-router.mjs` sends a small text heartbeat such as `task N · 处理中` before processing ordinary task messages. In interactive mode this heartbeat is the only dispatch acknowledgement; the router suppresses the redundant `interactive 已发送 / 已进入后台等待` reply. Immediate commands such as `list` / `列表` and `task close ...` / `任务 关闭 ...` reply normally.
@@ -27,6 +34,48 @@ The plugin separates the completion event from the Weixin transport:
 - Multiple Codex processes are separated by an explicit session id when available; otherwise the sender derives a short id from process and workspace context.
 - Secrets are read from `~/.codex/weixin-notifier.json` or environment variables, never from prompts.
 - Transport is an HTTP adapter shaped from the Tencent iLink API used by `@tencent-weixin/openclaw-weixin`; it does not require running OpenClaw.
+
+## Feishu Setup
+
+Configure each Feishu China-domain enterprise self-built application bot separately; Lark international tenants are not supported in this release. Manual mode prompts for the App Secret without placing it in shell history:
+
+```bash
+node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
+  --account company-a --bot codex-main --mode manual
+```
+
+QR mode uses the official SDK application registration flow and requests bot identity, private-message receive, group `@bot` receive, send-as-bot, media, and `im.message.receive_v1` capabilities:
+
+```bash
+node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
+  --account company-a --bot codex-main --mode qr
+```
+
+After scanning or entering credentials, ensure the app is published, permissions are approved, long-connection events are enabled, and the bot is added to target groups. Then validate:
+
+```bash
+node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
+  --account company-a --bot codex-main --check
+```
+
+The config file is written with mode `0600`. Repeat setup for more accounts or bots, then start every enabled adapter with:
+
+```bash
+/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh --restart
+```
+
+Feishu DMs are accepted directly. Group messages must explicitly mention the current bot; when multiple configured bots are in one group, each reacts only to its own mention. Replies are associated with the inbound message, and topic messages remain in the same topic. Feishu text stays native Markdown/rich text; only `task snap` and explicit image media are PNGs.
+
+General notification examples:
+
+```bash
+node /path/to/codex-weixin-notifier/scripts/notify.mjs --dry-run \
+  --task "Smoke test" --summary "Fan-out formatting test"
+
+node /path/to/codex-weixin-notifier/scripts/notify.mjs \
+  --channel feishu --account company-a --bot codex-main --target ops \
+  --task "Codex finished"
+```
 
 ## Pair
 
@@ -212,7 +261,7 @@ Use the sender as the completion command from any Codex or VS Code wrapper that 
 
 ```bash
 CODEX_SESSION_ID="${CODEX_SESSION_ID:-codex-$$}" \
-node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
+node /path/to/codex-weixin-notifier/scripts/notify.mjs \
   --source "${CODEX_PRODUCT:-codex}" \
   --status "${CODEX_STATUS:-completed}" \
   --task "${CODEX_TASK:-Codex task}"
@@ -222,10 +271,10 @@ If the host provides a JSON hook payload, pipe it to stdin:
 
 ```bash
 printf '%s' "$CODEX_HOOK_PAYLOAD" | \
-node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs
+node /path/to/codex-weixin-notifier/scripts/notify.mjs
 ```
 
-For Codex Stop hooks, use `scripts/codex-finish-hook.mjs` rather than calling `notify-weixin.mjs` directly. It writes the event to `/tmp/codex-weixin-notifier-hooks/`, starts `notify-weixin.mjs` in a short-lived background tmux session, and exits immediately so slow Weixin rendering or upload does not trip the host hook timeout. Check `/tmp/codex-weixin-notifier-hook.log` for launcher and sender output.
+For Codex Stop hooks, use `scripts/codex-finish-hook.mjs` rather than calling a sender directly. It writes the event to `/tmp/codex-weixin-notifier-hooks/`, starts the general `notify.mjs` fan-out sender in a short-lived background tmux session, and exits immediately so slow rendering or channel APIs do not trip the host hook timeout. Check `/tmp/codex-weixin-notifier-hook.log` for launcher and per-target sender output. Router-launched tasks set both the legacy `CODEX_WEIXIN_ROUTER_TASK=1` and general `CODEX_NOTIFIER_ROUTER_TASK=1` suppressors.
 
 For progress tracking, configure `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PreToolUse`, and `PostToolUse` to call `scripts/codex-task-state-hook.mjs`; keep `Stop` on `codex-finish-hook.mjs`, which also records completion. The repository includes `scripts/codex-task-hooks.example.toml`. Restart CLI sessions and reload VS Code after changing global Hook configuration, then review new command Hooks in `/hooks` unless the invocation explicitly uses Codex's vetted-automation Hook trust bypass.
 

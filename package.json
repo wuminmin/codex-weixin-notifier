@@ -1,12 +1,16 @@
 {
   "name": "codex-weixin-notifier",
-  "version": "0.1.2",
-  "description": "Send Weixin notifications and route numbered Codex tasks from Weixin.",
+  "version": "0.2.0",
+  "description": "Send Weixin and Feishu notifications and route isolated Codex tasks from multiple bots.",
   "license": "MIT",
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.71.1",
     "marked": "^18.0.5",
     "playwright-core": "^1.61.1",
     "qrcode-terminal": "^0.12.0"

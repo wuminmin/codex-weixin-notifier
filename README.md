@@ -1,6 +1,6 @@
-# Codex Weixin Notifier
+# Codex Weixin & Feishu Notifier
 
-Local Codex plugin that pairs Weixin by QR code, sends Weixin notifications when Codex work completes, and accepts Weixin commands for starting and extending Codex tasks.
+Local Codex plugin that routes numbered Codex tasks through Weixin and Feishu, and fans completion notifications out to configured targets. Feishu supports multiple enterprise accounts and multiple application bots per account; every bot has an isolated task pool, attachment directory, state namespace, and tmux session set.
 
 ## Install
 
@@ -37,14 +37,15 @@ Requirements:
 
 - Node.js 20 or newer.
 - `git` and `npm`.
-- `tmux` for Weixin command routing.
+- `tmux` for interactive command routing.
 - Codex CLI if you want the plugin registered in Codex.
+- A Feishu enterprise self-built app for Feishu routing. Custom group webhooks are not supported because they cannot receive messages.
 
 Installer overrides:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
-  | CODEX_WEIXIN_REF=v0.1.2 bash
+  | CODEX_WEIXIN_REF=v0.2.0 bash
 
 curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
   | CODEX_WEIXIN_INSTALL_ROOT="$HOME/.local/share/codex-weixin-notifier" bash
@@ -61,6 +62,16 @@ node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/script
 ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/start-router-tmux.sh
 ```
 
+For Feishu, configure one or more application bots before starting the same router:
+
+```bash
+node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/setup-feishu.mjs \
+  --account company-a --bot codex-main --mode qr
+
+node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/setup-feishu.mjs \
+  --account company-a --bot codex-main --check
+```
+
 First-run journey:
 
 1. Run `pair-weixin.mjs` in the WSL terminal. It prints a terminal QR code; scan it with Weixin and confirm authorization on the phone.
@@ -72,11 +83,118 @@ First-run journey:
 ## Architecture
 
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
-- `scripts/notify-weixin.mjs` normalizes the Codex completion event, adds a per-session identity, formats a concise message, and posts it to the Tencent iLink `sendmessage` endpoint. Completion notifications are rendered as terminal-style long PNG images by default.
-- `scripts/weixin-command-router.mjs` long-polls inbound Weixin messages, keeps a numbered task list, switches the current task with `task N` / `任务 N`, and forwards ordinary text to the selected Codex task.
+- `scripts/codex-command-router.mjs` starts every enabled channel in one process. It long-polls the legacy Weixin adapter and establishes one official Feishu Channel WebSocket connection per enabled application bot.
+- `scripts/weixin-command-router.mjs` contains the compatibility Weixin entry and the shared numbered-task core. Routing context is `{channel, account, bot, conversation}`; task pools are shared only inside one bot, while each conversation stores its own current task.
+- `scripts/notify.mjs` is the general completion sender. It performs best-effort fan-out to the configured Weixin bot and every enabled entry in Feishu `notifyTargets`; `scripts/notify-weixin.mjs` remains a Weixin-only compatibility entry.
+- `scripts/setup-feishu.mjs` supports hidden interactive App ID/Secret entry, official SDK QR application registration, credential checks, and mode-`0600` config writes.
 - `scripts/codex-task-state-hook.mjs` records Codex lifecycle events from WSL CLI and VS Code into a small local session registry. `scripts/codex-task-monitor.mjs` merges that registry with Weixin-managed tmux tasks and renders the fixed `任务`, `进度`, and `状态` views without invoking a model.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
+- The Feishu transport uses the official [`@larksuiteoapi/node-sdk` Channel](https://github.com/larksuite/node-sdk/blob/main/docs/channel.md), including WebSocket reconnect, message normalization, deduplication, per-chat ordering, native Markdown chunking, media APIs, and group `@bot` policy.
+
+## General Configuration
+
+The general config is `~/.codex/codex-notifier.json`. Resolution order is:
+
+1. Explicit `--config` or `CODEX_NOTIFIER_CONFIG` (the legacy `CODEX_WEIXIN_CONFIG` override is also accepted).
+2. `~/.codex/codex-notifier.json`.
+3. Legacy `~/.codex/weixin-notifier.json`.
+
+The old config is read in place as `weixin/default/default`; credentials and state are not copied or migrated. When a general config exists but has no `weixin` channel, an existing legacy Weixin config is included automatically. See `scripts/codex-notifier.example.json` for a two-bot example.
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "codexCwd": "~",
+    "runner": "interactive",
+    "renderMarkdownImages": true
+  },
+  "channels": {
+    "feishu": {
+      "accounts": {
+        "company-a": {
+          "displayName": "Company A",
+          "bots": {
+            "codex-main": {
+              "enabled": true,
+              "appId": "cli_xxx",
+              "appSecret": "secret",
+              "notifyTargets": [
+                { "id": "ops", "chatId": "oc_xxx", "enabled": true }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+General state lives under `~/.codex/codex-notifier/state/<channel>/...`. Account and bot names are combined with a stable short hash for state and tmux names, so punctuation and long names cannot collide. Each Feishu namespace also records `channel-status.json` and diagnostic logs for connect, reconnect, authentication, permission, and handler failures. The legacy Weixin default keeps `~/.codex/weixin-notifier`, `~/codex/taskN`, and `codex-wx-task-N` unchanged.
+
+## Configure Feishu
+
+Feishu routing requires a China-domain Feishu enterprise self-built application; Lark international tenants are not supported in this release. Each configured `bot` has its own App ID and App Secret; do not reuse one application under multiple bot entries because Feishu long connections use cluster delivery and only one connection should run for each application.
+
+Manual setup asks for the Secret interactively so it does not enter shell history:
+
+```bash
+node scripts/setup-feishu.mjs \
+  --account company-a \
+  --bot codex-main \
+  --mode manual
+```
+
+QR setup uses the official SDK one-click application registration flow and pre-requests bot identity, private-message receive, group `@bot` receive, message send, media, and `im.message.receive_v1` capabilities:
+
+```bash
+node scripts/setup-feishu.mjs \
+  --account company-a \
+  --bot codex-main \
+  --mode qr
+```
+
+After either setup mode:
+
+1. Open the Feishu developer console and verify the application was created in the intended enterprise.
+2. Enable the bot capability and long-connection event subscription.
+3. Confirm `im.message.receive_v1` and the requested message/media permissions are approved.
+4. Create and publish an application version; enterprise approval may be required.
+5. Add the application bot to each target group. In groups, explicitly `@` that bot; direct messages need no mention.
+6. Validate credentials and the WebSocket handshake:
+
+```bash
+node scripts/setup-feishu.mjs --account company-a --bot codex-main --check
+```
+
+Start all enabled Weixin and Feishu adapters with one process:
+
+```bash
+node scripts/codex-command-router.mjs
+# or
+scripts/start-router-tmux.sh --restart
+```
+
+Each Feishu bot has its own task 0, numbered tasks, attachment inboxes, state, and tmux sessions. Conversations using the same bot share that bot's task pool, but `currentTask` is tracked by Feishu `chatId`; identical `open_id`, `chatId`, and task numbers under another bot remain isolated. Replies reference the original message, and topic messages stay in the original topic.
+
+## Completion Notifications
+
+`notify.mjs` sends to Weixin and all enabled Feishu `notifyTargets`. A failure for one target does not stop the others; each target result is printed, and the command exits nonzero if any target failed.
+
+```bash
+node scripts/notify.mjs --dry-run --task "Smoke test" --summary "Fan-out test"
+
+node scripts/notify.mjs \
+  --channel feishu \
+  --account company-a \
+  --bot codex-main \
+  --target ops \
+  --task "Deploy complete"
+```
+
+`--target` accepts the target `id` or `chatId`. Feishu notification targets use `chatId` for either a group or a direct-message conversation. Feishu replies use native rich text/Markdown and SDK chunking; Weixin continues to render Markdown as long images by default. `task snap` remains a PNG on both channels.
 
 ## Pair Weixin
 
@@ -123,6 +241,12 @@ Secrets can also be supplied through:
 
 ## Test
 
+Run the automated configuration, isolation, queue, setup, and fan-out tests:
+
+```bash
+npm test
+```
+
 ```bash
 node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
   --dry-run \
@@ -149,15 +273,24 @@ node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
   --summary "This should arrive in Weixin."
 ```
 
+Dry-run one Feishu bot without opening a WebSocket:
+
+```bash
+node scripts/codex-command-router.mjs \
+  --config /path/to/codex-notifier.json \
+  --channel feishu --account company-a --bot codex-main \
+  --once --dry-run --message list
+```
+
 ## Weixin Commands
 
-Start the command router after pairing and binding:
+Start only the legacy-compatible Weixin command router after pairing and binding:
 
 ```bash
 node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs
 ```
 
-Or start it in the fixed tmux router session:
+Or start all configured channels in the fixed tmux router session:
 
 ```bash
 /path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
@@ -256,7 +389,7 @@ ls
 列文件
 ```
 
-`任务`, `进度`, and `状态` are exact local commands and never reach Codex. `任务` merges the numbered Weixin tasks with recent WSL CLI and VS Code sessions, `进度` keeps only running or waiting work, and `状态` reports router, tmux, CLI, VS Code app-server, and Hook health. `list` / `列表` keeps the original numbered-task-only view.
+`任务`, `进度`, and `状态` are exact local commands and never reach Codex. On the legacy Weixin bot, `任务` merges numbered Weixin tasks with recent WSL CLI and VS Code sessions, `进度` keeps only running or waiting work, and `状态` reports router, tmux, CLI, VS Code app-server, and Hook health. On Feishu, these views are scoped to the current `{account, bot}` namespace so another bot's tasks and paths never appear. `list` / `列表` keeps the numbered-task-only view on either channel.
 
 `task 0` / `任务 0` is the default Codex assistant and always exists. `task 1` / `任务 1`, `task 2` / `任务 2`, and later tasks are explicit task slots created only by `task N` or `任务 N` commands. The router handles exact English commands such as `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot`, plus Chinese equivalents such as `列表`, `任务 N`, `任务 关闭 N`, `任务 重置 N`, `任务 别名 N name`, `任务 name`, `任务 tmux 清理`, and `任务 截图`. It also accepts a small WSL command whitelist: `pwd` / `当前目录`, `ls` / `列文件`, and `ls` / `列文件` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
 
@@ -418,7 +551,7 @@ For interactive replies, the router sends the heartbeat immediately, then tracks
 
 By default, normal text/Markdown replies and completion notifications are rendered as terminal-style long PNG images before being sent to Weixin. Set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. `markdownImageMaxHeight` is the per-image output PNG height and defaults to `30000` for long-image mode; content beyond that limit is sent as multiple images instead of being clipped. If rendering or image upload fails, the sender falls back to the original text reply.
 
-## Weixin Attachments
+## Weixin and Feishu Attachments
 
 The command router accepts inbound Weixin image and file messages for the current task:
 
@@ -426,6 +559,8 @@ The command router accepts inbound Weixin image and file messages for the curren
 - Inbound files are downloaded into the task data directory, normally `~/codex/taskN/inbox/`, and their local paths are included in the Codex prompt so the task can read them directly.
 - If a task is already running, the text plus attachment paths are queued together and started after the current run finishes.
 - Attachments use the same 20 MB default size limit as media replies; override it with `CODEX_WEIXIN_MAX_MEDIA_BYTES` or `maxMediaBytes`.
+
+Feishu uses the same task workflow and size/allowed-directory checks. The official Channel downloads image/file resources into that bot's `taskN/inbox/`; image paths are attached with `--image`, while other file paths are included in the prompt. A file received by one bot is never written to another bot's task tree.
 
 Local dry-run for the attachment path:
 
@@ -439,7 +574,7 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
 
 ## Media Replies
 
-The command router can send local images and file attachments back to Weixin when a Codex task includes a media directive on its own line:
+The command router can send local images and file attachments back to Weixin or Feishu when a Codex task includes a media directive on its own line:
 
 ```text
 Here is the screenshot.
@@ -451,6 +586,7 @@ Supported behavior:
 - Image files such as `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, and `.bmp` are sent as Weixin image messages.
 - Other allowed files such as `.txt`, `.log`, `.json`, `.pdf`, `.zip`, Office documents, and archives are sent as Weixin file attachments.
 - Media is uploaded through the official iLink `getuploadurl` plus Weixin CDN flow before `sendmessage`.
+- Feishu media is uploaded with the official Channel image/file APIs and is associated with the originating message or topic.
 - If upload or send fails, the router sends a text fallback describing the failed path and error.
 
 Safety limits:
@@ -497,7 +633,7 @@ CODEX_SESSION_ID="vscode-${VSCODE_PID:-window}-$$"
 CODEX_PRODUCT="vscode-codex"
 ```
 
-For Codex Stop hooks, use `scripts/codex-finish-hook.mjs` instead of calling `notify-weixin.mjs` directly. It first records the completed task state, then writes the notification event to `/tmp/codex-weixin-notifier-hooks/`, starts `notify-weixin.mjs` in a short-lived background tmux session, and exits immediately so Codex does not fail the hook when Weixin rendering or upload takes longer than the host hook timeout. Hook launcher and sender output is appended to `/tmp/codex-weixin-notifier-hook.log`.
+For Codex Stop hooks, use `scripts/codex-finish-hook.mjs` instead of calling a sender directly. It first records the completed task state, then writes the notification event to `/tmp/codex-weixin-notifier-hooks/`, starts the general `notify.mjs` sender in a short-lived background tmux session, and exits immediately so Codex does not fail the hook when rendering or channel APIs take longer than the host hook timeout. Hook launcher and per-target sender output is appended to `/tmp/codex-weixin-notifier-hook.log`. Child tasks launched by any notifier channel set `CODEX_NOTIFIER_ROUTER_TASK=1`, which suppresses duplicate completion notifications.
 
 ## Publishing
 
@@ -507,7 +643,7 @@ To publish this as a one-line install project:
 2. Confirm `DEFAULT_REPO_URL` in `install.sh` points at the public repository.
 3. Confirm the included MIT `LICENSE` is the license you want, or replace it before inviting outside users.
 4. Commit and push `install.sh` and this README update.
-5. Tag a stable release, for example `git tag v0.1.2 && git push origin v0.1.2`.
+5. Tag a stable release, for example `git tag v0.2.0 && git push origin v0.2.0`.
 6. Test from a clean shell:
 
 ```bash
@@ -521,8 +657,8 @@ curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main
 For a release-pinned install command, publish:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/v0.1.2/install.sh \
-  | CODEX_WEIXIN_REF=v0.1.2 bash
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/v0.2.0/install.sh \
+  | CODEX_WEIXIN_REF=v0.2.0 bash
 ```
 
 If GitHub raw returns `429`, use the API raw endpoint:
@@ -530,8 +666,8 @@ If GitHub raw returns `429`, use the API raw endpoint:
 ```bash
 curl -fsSL \
   -H 'Accept: application/vnd.github.raw' \
-  'https://api.github.com/repos/wuminmin/codex-weixin-notifier/contents/install.sh?ref=v0.1.2' \
-  | CODEX_WEIXIN_REF=v0.1.2 bash
+  'https://api.github.com/repos/wuminmin/codex-weixin-notifier/contents/install.sh?ref=v0.2.0' \
+  | CODEX_WEIXIN_REF=v0.2.0 bash
 ```
 
 ## License

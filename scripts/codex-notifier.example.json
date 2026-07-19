@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "defaults": {
+    "codexCwd": "~",
+    "runner": "interactive",
+    "renderMarkdownImages": true,
+    "maxMediaBytes": 20971520
+  },
+  "channels": {
+    "weixin": {
+      "accounts": {
+        "default": {
+          "displayName": "Weixin",
+          "bots": {
+            "default": {
+              "enabled": true,
+              "transport": "ilink-login",
+              "baseUrl": "https://ilinkai.weixin.qq.com",
+              "token": "generated-by-pair-weixin",
+              "botId": "generated-by-pair-weixin",
+              "userId": "generated-by-pair-weixin",
+              "toUser": "generated-by-bind-recipient",
+              "contextToken": "generated-by-bind-recipient"
+            }
+          }
+        }
+      }
+    },
+    "feishu": {
+      "accounts": {
+        "company-a": {
+          "displayName": "Company A",
+          "bots": {
+            "codex-main": {
+              "enabled": true,
+              "appId": "cli_xxx",
+              "appSecret": "replace-me",
+              "notifyTargets": [
+                {
+                  "id": "ops",
+                  "chatId": "oc_xxx",
+                  "enabled": true
+                }
+              ]
+            },
+            "codex-review": {
+              "enabled": false,
+              "appId": "cli_yyy",
+              "appSecret": "replace-me",
+              "notifyTargets": []
+            }
+          }
+        }
+      }
+    }
+  }
+}

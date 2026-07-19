@@ -3,7 +3,7 @@ set -euo pipefail
 
 PLUGIN_NAME="codex-weixin-notifier"
 MARKETPLACE_NAME="codex-weixin-notifier"
-DISPLAY_NAME="Codex Weixin Notifier"
+DISPLAY_NAME="Codex Weixin & Feishu Notifier"
 DEFAULT_REPO_URL="https://github.com/wuminmin/codex-weixin-notifier.git"
 DEFAULT_REF="main"
 
@@ -149,10 +149,14 @@ Next steps:
   3. Bind that Weixin conversation so replies can be sent back:
   node "$PLUGIN_DIR/scripts/bind-recipient.mjs"
 
-  4. Start the Weixin command router:
+  4. Optional: configure a Feishu application bot (repeat for more bots):
+  node "$PLUGIN_DIR/scripts/setup-feishu.mjs" --account company-a --bot codex-main --mode qr
+  node "$PLUGIN_DIR/scripts/setup-feishu.mjs" --account company-a --bot codex-main --check
+
+  5. Start the shared Weixin + Feishu command router:
   "$PLUGIN_DIR/scripts/start-router-tmux.sh"
 
-  5. In Weixin, send:
+  6. In Weixin or a Feishu DM (or @the bot in a group), send:
      list
      列表
      summarize this repository
