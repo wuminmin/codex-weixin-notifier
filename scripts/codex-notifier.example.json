@@ -33,6 +33,7 @@
           "bots": {
             "codex-main": {
               "enabled": true,
+              "platform": "feishu",
               "appId": "cli_xxx",
               "appSecret": "replace-me",
               "notifyTargets": [
@@ -45,9 +46,23 @@
             },
             "codex-review": {
               "enabled": false,
+              "platform": "feishu",
               "appId": "cli_yyy",
               "appSecret": "replace-me",
               "notifyTargets": []
+            },
+            "codex-lark": {
+              "enabled": false,
+              "platform": "lark",
+              "appId": "cli_zzz",
+              "appSecret": "replace-me",
+              "notifyTargets": [
+                {
+                  "id": "global",
+                  "chatId": "oc_lark_xxx",
+                  "enabled": true
+                }
+              ]
             }
           }
         }

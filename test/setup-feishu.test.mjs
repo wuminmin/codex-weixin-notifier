@@ -45,15 +45,47 @@ test("QR setup requests bot messaging, media, and message event capabilities", a
     registerApp: async (options) => {
       registrationOptions = options;
       options.onQRCodeReady({ url: "https://example.invalid/qr", expireIn: 600 });
-      return { client_id: "cli_qr", client_secret: "secret" };
+      return { client_id: "cli_qr", client_secret: "secret", user_info: { tenant_brand: "feishu" } };
     },
   });
   assert.equal(registrationOptions.createOnly, true);
+  assert.equal(registrationOptions.domain, "accounts.feishu.cn");
+  assert.equal(registrationOptions.larkDomain, "accounts.larksuite.com");
   assert.ok(registrationOptions.addons.scopes.tenant.includes("im:message:send_as_bot"));
   assert.ok(registrationOptions.addons.scopes.tenant.includes("im:resource"));
   assert.ok(registrationOptions.addons.scopes.tenant.includes("im:message.group_at_msg:readonly"));
   assert.ok(registrationOptions.addons.scopes.tenant.includes("im:message.p2p_msg:readonly"));
   assert.deepEqual(registrationOptions.addons.events.items.tenant, ["im.message.receive_v1"]);
+});
+
+test("QR setup supports Lark tenants and writes platform", async () => {
+  const configPath = configFixture();
+  let registrationOptions;
+  await runSetupFeishu(["--config", configPath, "--account", "global-a", "--bot", "main", "--platform", "lark", "--mode", "qr"], {
+    registerApp: async (options) => {
+      registrationOptions = options;
+      options.onQRCodeReady({ url: "https://example.invalid/lark", expireIn: 600 });
+      return { client_id: "cli_lark", client_secret: "secret", user_info: { tenant_brand: "lark" } };
+    },
+  });
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.equal(registrationOptions.domain, "accounts.larksuite.com");
+  assert.equal(config.channels.feishu.accounts["global-a"].bots.main.platform, "lark");
+});
+
+test("QR setup refuses mismatched Feishu/Lark tenant brand before writing credentials", async () => {
+  const configPath = configFixture();
+  await assert.rejects(
+    runSetupFeishu(["--config", configPath, "--account", "global-a", "--bot", "main", "--platform", "lark", "--mode", "qr"], {
+      registerApp: async (options) => {
+        options.onQRCodeReady({ url: "https://example.invalid/feishu", expireIn: 600 });
+        return { client_id: "cli_wrong", client_secret: "secret", user_info: { tenant_brand: "feishu" } };
+      },
+    }),
+    /Scanned tenant is Feishu/u,
+  );
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.equal(config.channels.feishu, undefined);
 });
 
 test("check connects and disconnects the selected bot", async () => {

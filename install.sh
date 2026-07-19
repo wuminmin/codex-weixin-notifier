@@ -42,6 +42,7 @@ Environment overrides:
   CODEX_WEIXIN_INSTALL_ROOT      Install root. Default: ~/.codex/plugins/$PLUGIN_NAME
   CODEX_WEIXIN_SKIP_CODEX_PLUGIN Set to 1 to skip Codex plugin registration.
   CODEX_WEIXIN_SKIP_NPM          Set to 1 to skip npm dependency install.
+  CODEX_WEIXIN_SKIP_ONBOARDING   Set to 1 to skip the interactive onboard flow.
 
 Example:
   curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh | bash
@@ -139,26 +140,26 @@ $DISPLAY_NAME installed.
 Plugin directory:
   $PLUGIN_DIR
 
-Next steps:
-  1. Pair Weixin. Scan the terminal QR code with Weixin and confirm on the phone:
-  node "$PLUGIN_DIR/scripts/pair-weixin.mjs"
+Onboard:
+  node "$PLUGIN_DIR/scripts/onboard.mjs"
+  node "$PLUGIN_DIR/scripts/onboard.mjs" --help
 
-  2. In Weixin, send this message to the paired bot:
-     bind codex
-
-  3. Bind that Weixin conversation so replies can be sent back:
-  node "$PLUGIN_DIR/scripts/bind-recipient.mjs"
-
-  4. Optional: configure a Feishu application bot (repeat for more bots):
-  node "$PLUGIN_DIR/scripts/setup-feishu.mjs" --account company-a --bot codex-main --mode qr
-  node "$PLUGIN_DIR/scripts/setup-feishu.mjs" --account company-a --bot codex-main --check
-
-  5. Start the shared Weixin + Feishu command router:
-  "$PLUGIN_DIR/scripts/start-router-tmux.sh"
-
-  6. In Weixin or a Feishu DM (or @the bot in a group), send:
-     list
-     列表
-     summarize this repository
-     总结这个仓库
+Quick commands after onboard:
+  list
+  列表
+  help
+  onboard
 EOF
+
+if [ "${CODEX_WEIXIN_SKIP_ONBOARDING:-0}" != "1" ] && [ -t 0 ] && [ -t 1 ]; then
+  say ""
+  say "Starting interactive onboard. Set CODEX_WEIXIN_SKIP_ONBOARDING=1 to skip this step."
+  if ! node "$PLUGIN_DIR/scripts/onboard.mjs"; then
+    say "warning: onboard did not complete."
+    say "         Re-run: node \"$PLUGIN_DIR/scripts/onboard.mjs\""
+  fi
+else
+  say ""
+  say "Interactive onboard was not started. Run:"
+  say "  node \"$PLUGIN_DIR/scripts/onboard.mjs\""
+fi

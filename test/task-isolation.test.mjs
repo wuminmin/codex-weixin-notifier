@@ -79,3 +79,19 @@ test("queued task completion reply context remains serializable and conversation
   assert.equal(config.feishuReplyTo, "om_message");
   assert.equal(config.feishuReplyInThread, true);
 });
+
+test("chat help and onboard commands describe the current Lark bot", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-notifier-help-"));
+  const config = runtime(home, "global", "main");
+  config.platform = "lark";
+  config.configPath = path.join(home, ".codex", "codex-notifier.json");
+  await withRuntimeConfig(config, async () => {
+    const help = await taskCoreForTests.handleText("help", "oc_chat", config);
+    assert.match(help, /Lark 国际版/u);
+    assert.match(help, /list/u);
+    assert.match(help, /node scripts\/onboard\.mjs/u);
+    const onboard = await taskCoreForTests.handleText("onboard", "oc_chat", config);
+    assert.match(onboard, /--channel feishu --platform lark/u);
+    assert.match(onboard, /global/u);
+  });
+});

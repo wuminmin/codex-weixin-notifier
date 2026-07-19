@@ -1,6 +1,6 @@
-# Codex Weixin & Feishu Notifier
+# Codex Weixin, Feishu & Lark Notifier
 
-Local Codex plugin that routes numbered Codex tasks through Weixin and Feishu, and fans completion notifications out to configured targets. Feishu supports multiple enterprise accounts and multiple application bots per account; every bot has an isolated task pool, attachment directory, state namespace, and tmux session set.
+Local Codex plugin that routes numbered Codex tasks through Weixin, Feishu China, and Lark international, and fans completion notifications out to configured targets. Feishu/Lark supports multiple enterprise accounts and multiple application bots per account; every bot has an isolated task pool, attachment directory, state namespace, and tmux session set.
 
 ## Install
 
@@ -39,7 +39,7 @@ Requirements:
 - `git` and `npm`.
 - `tmux` for interactive command routing.
 - Codex CLI if you want the plugin registered in Codex.
-- A Feishu enterprise self-built app for Feishu routing. Custom group webhooks are not supported because they cannot receive messages.
+- A Feishu or Lark enterprise self-built app for Feishu/Lark routing. Custom group webhooks are not supported because they cannot receive messages.
 
 Installer overrides:
 
@@ -52,45 +52,47 @@ curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main
 
 curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
   | CODEX_WEIXIN_SKIP_CODEX_PLUGIN=1 bash
+
+curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+  | CODEX_WEIXIN_SKIP_ONBOARDING=1 bash
 ```
 
-After installation:
+After installation, an interactive terminal automatically starts onboard. You can run it again at any time:
 
 ```bash
-node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/pair-weixin.mjs
-node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/bind-recipient.mjs
-~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/start-router-tmux.sh
+node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/onboard.mjs
+node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/onboard.mjs --help
 ```
 
-For Feishu, configure one or more application bots before starting the same router:
+Direct examples:
 
 ```bash
-node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/setup-feishu.mjs \
-  --account company-a --bot codex-main --mode qr
-
-node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/setup-feishu.mjs \
-  --account company-a --bot codex-main --check
+node scripts/onboard.mjs --channel weixin --mode qr
+node scripts/onboard.mjs --channel feishu --platform feishu --mode qr --account company-a --bot codex-main
+node scripts/onboard.mjs --channel feishu --platform lark --mode qr --account global-a --bot codex-main
 ```
 
 First-run journey:
 
-1. Run `pair-weixin.mjs` in the WSL terminal. It prints a terminal QR code; scan it with Weixin and confirm authorization on the phone.
-2. Send `bind codex` to the paired Weixin bot, then run `bind-recipient.mjs` in the terminal. This captures the recipient and `contextToken` required by iLink sends.
-3. Start the router with `start-router-tmux.sh`. The command is idempotent and should print `codex-wx-router: started` or `already running`.
-4. In Weixin, send `list` or `列表` to confirm the bot is alive, then send the first real request, for example `summarize this repository` or `总结这个仓库`. Ordinary text is forwarded to the current task, normally `task 0`.
-5. If Codex asks a `Question 1/1` multiple-choice prompt, Weixin receives the full question text and numbered options. Reply with `1`, `2`, etc. to answer it.
+1. Run the installer; in a TTY it starts `onboard.mjs`.
+2. Choose `weixin` or `feishu`; for `feishu`, choose `Feishu China` or `Lark international`.
+3. Choose QR scan or manual input. Secrets are hidden during manual input.
+4. Complete any Feishu/Lark developer-console publish, permission approval, long-connection, and bot-add steps.
+5. Onboard starts the shared router. Send `list` in Weixin/Feishu/Lark, or `@bot list` in a Feishu/Lark group.
+6. When you receive `task 0 [default,current]`, onboard records success. Feishu/Lark also remembers that chat as the default completion-notification target.
 
 ## Architecture
 
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
-- `scripts/codex-command-router.mjs` starts every enabled channel in one process. It long-polls the legacy Weixin adapter and establishes one official Feishu Channel WebSocket connection per enabled application bot.
+- `scripts/onboard.mjs` is the first-run setup entry for Weixin, Feishu China, and Lark international.
+- `scripts/codex-command-router.mjs` starts every enabled channel in one process. It long-polls the legacy Weixin adapter and establishes one official Feishu/Lark Channel WebSocket connection per enabled application bot.
 - `scripts/weixin-command-router.mjs` contains the compatibility Weixin entry and the shared numbered-task core. Routing context is `{channel, account, bot, conversation}`; task pools are shared only inside one bot, while each conversation stores its own current task.
 - `scripts/notify.mjs` is the general completion sender. It performs best-effort fan-out to the configured Weixin bot and every enabled entry in Feishu `notifyTargets`; `scripts/notify-weixin.mjs` remains a Weixin-only compatibility entry.
-- `scripts/setup-feishu.mjs` supports hidden interactive App ID/Secret entry, official SDK QR application registration, credential checks, and mode-`0600` config writes.
+- `scripts/setup-feishu.mjs` supports hidden interactive App ID/Secret entry, official SDK QR application registration, credential checks, Feishu/Lark platform selection, and mode-`0600` config writes.
 - `scripts/codex-task-state-hook.mjs` records Codex lifecycle events from WSL CLI and VS Code into a small local session registry. `scripts/codex-task-monitor.mjs` merges that registry with Weixin-managed tmux tasks and renders the fixed `任务`, `进度`, and `状态` views without invoking a model.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
-- The Feishu transport uses the official [`@larksuiteoapi/node-sdk` Channel](https://github.com/larksuite/node-sdk/blob/main/docs/channel.md), including WebSocket reconnect, message normalization, deduplication, per-chat ordering, native Markdown chunking, media APIs, and group `@bot` policy.
+- The Feishu/Lark transport uses the official [`@larksuiteoapi/node-sdk` Channel](https://github.com/larksuite/node-sdk/blob/main/docs/channel.md), including WebSocket reconnect, message normalization, deduplication, per-chat ordering, native Markdown chunking, media APIs, and group `@bot` policy.
 
 ## General Configuration
 
@@ -118,6 +120,7 @@ The old config is read in place as `weixin/default/default`; credentials and sta
           "bots": {
             "codex-main": {
               "enabled": true,
+              "platform": "feishu",
               "appId": "cli_xxx",
               "appSecret": "secret",
               "notifyTargets": [
@@ -132,11 +135,13 @@ The old config is read in place as `weixin/default/default`; credentials and sta
 }
 ```
 
-General state lives under `~/.codex/codex-notifier/state/<channel>/...`. Account and bot names are combined with a stable short hash for state and tmux names, so punctuation and long names cannot collide. Each Feishu namespace also records `channel-status.json` and diagnostic logs for connect, reconnect, authentication, permission, and handler failures. The legacy Weixin default keeps `~/.codex/weixin-notifier`, `~/codex/taskN`, and `codex-wx-task-N` unchanged.
+Set `"platform": "lark"` for Lark international bots. Omitted platform defaults to `"feishu"` for backward compatibility.
 
-## Configure Feishu
+General state lives under `~/.codex/codex-notifier/state/<channel>/...`. Account and bot names are combined with a stable short hash for state and tmux names, so punctuation and long names cannot collide. Each Feishu/Lark namespace also records `channel-status.json` and diagnostic logs for connect, reconnect, authentication, permission, and handler failures. The legacy Weixin default keeps `~/.codex/weixin-notifier`, `~/codex/taskN`, and `codex-wx-task-N` unchanged.
 
-Feishu routing requires a China-domain Feishu enterprise self-built application; Lark international tenants are not supported in this release. Each configured `bot` has its own App ID and App Secret; do not reuse one application under multiple bot entries because Feishu long connections use cluster delivery and only one connection should run for each application.
+## Configure Feishu or Lark
+
+Feishu/Lark routing requires an enterprise self-built application. Each configured `bot` has its own App ID and App Secret; do not reuse one application under multiple bot entries because long connections use cluster delivery and only one connection should run for each application.
 
 Manual setup asks for the Secret interactively so it does not enter shell history:
 
@@ -144,6 +149,7 @@ Manual setup asks for the Secret interactively so it does not enter shell histor
 node scripts/setup-feishu.mjs \
   --account company-a \
   --bot codex-main \
+  --platform feishu \
   --mode manual
 ```
 
@@ -153,12 +159,13 @@ QR setup uses the official SDK one-click application registration flow and pre-r
 node scripts/setup-feishu.mjs \
   --account company-a \
   --bot codex-main \
+  --platform lark \
   --mode qr
 ```
 
 After either setup mode:
 
-1. Open the Feishu developer console and verify the application was created in the intended enterprise.
+1. Open the Feishu or Lark developer console and verify the application was created in the intended enterprise.
 2. Enable the bot capability and long-connection event subscription.
 3. Confirm `im.message.receive_v1` and the requested message/media permissions are approved.
 4. Create and publish an application version; enterprise approval may be required.
@@ -166,7 +173,7 @@ After either setup mode:
 6. Validate credentials and the WebSocket handshake:
 
 ```bash
-node scripts/setup-feishu.mjs --account company-a --bot codex-main --check
+node scripts/setup-feishu.mjs --account company-a --bot codex-main --platform feishu --check
 ```
 
 Start all enabled Weixin and Feishu adapters with one process:
@@ -177,7 +184,7 @@ node scripts/codex-command-router.mjs
 scripts/start-router-tmux.sh --restart
 ```
 
-Each Feishu bot has its own task 0, numbered tasks, attachment inboxes, state, and tmux sessions. Conversations using the same bot share that bot's task pool, but `currentTask` is tracked by Feishu `chatId`; identical `open_id`, `chatId`, and task numbers under another bot remain isolated. Replies reference the original message, and topic messages stay in the original topic.
+Each Feishu/Lark bot has its own task 0, numbered tasks, attachment inboxes, state, and tmux sessions. Conversations using the same bot share that bot's task pool, but `currentTask` is tracked by chat `chatId`; identical `open_id`, `chatId`, and task numbers under another bot remain isolated. Replies reference the original message, and topic messages stay in the original topic.
 
 ## Completion Notifications
 
@@ -188,6 +195,7 @@ node scripts/notify.mjs --dry-run --task "Smoke test" --summary "Fan-out test"
 
 node scripts/notify.mjs \
   --channel feishu \
+  --platform lark \
   --account company-a \
   --bot codex-main \
   --target ops \

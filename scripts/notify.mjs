@@ -53,6 +53,7 @@ export function notificationTargets(loaded, selectors = {}) {
   const targets = [];
   const bots = listBotConfigs(loaded, {
     channel: selectors.channel,
+    platform: selectors.platform,
     account: selectors.account,
     bot: selectors.bot,
   });
@@ -86,7 +87,8 @@ export async function fanOutNotification(event, targets, options = {}) {
     }, { dryRun: config.dryRun });
   });
   return Promise.all(targets.map(async (config) => {
-    const label = `${config.channel}/${config.account}/${config.bot}/${config.target.id || config.target.chatId || "default"}`;
+    const platformPart = config.channel === "feishu" && config.platform === "lark" ? "/lark" : "";
+    const label = `${config.channel}${platformPart}/${config.account}/${config.bot}/${config.target.id || config.target.chatId || "default"}`;
     try {
       if (config.channel === "weixin") await sendWeixin(event, config, options.args || {});
       else if (config.channel === "feishu") await sendFeishu(event, config, options.args || {});
@@ -105,6 +107,7 @@ export async function runNotifier(argv = process.argv.slice(2)) {
   });
   const targets = notificationTargets(loaded, {
     channel: args.channel,
+    platform: args.platform || args.brand,
     account: args.account,
     bot: args.bot,
     target: args.target,

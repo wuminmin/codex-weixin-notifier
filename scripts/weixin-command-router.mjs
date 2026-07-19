@@ -17,7 +17,9 @@ import {
 import {
   listBotConfigs,
   loadNotifierConfig,
+  normalizeFeishuPlatform,
   runtimeConfigForBot,
+  upsertFeishuNotifyTarget,
   updateBotConfig,
 } from "./lib/notifier-config.mjs";
 import {
@@ -2985,9 +2987,61 @@ function formatChannelStatus() {
   ].join("\n");
 }
 
+function channelDisplayName(config = currentRuntimeConfig()) {
+  if (config.channel === "weixin") return "微信 / Weixin";
+  return normalizeFeishuPlatform(config.platform) === "lark" ? "Lark 国际版" : "飞书 / Feishu";
+}
+
+function formatHelp() {
+  const config = currentRuntimeConfig();
+  const lines = [
+    `${channelDisplayName(config)} Codex Notifier help`,
+    "",
+    "健康检查:",
+    "list / 列表 - 查看任务列表和 task 0",
+    "状态 - 查看连接、任务目录和运行状态",
+    "进度 - 查看运行中任务",
+    "",
+    "任务:",
+    "task 0 / 任务 0 - 进入默认 Codex 助理",
+    "task N / 任务 N - 创建或进入编号任务",
+    "task close N / 任务 关闭 N - 关闭任务",
+    "task reset N / 任务 重置 N - 重置非运行中任务",
+    "task snap / 任务 截图 - 发送当前任务终端截图",
+    "",
+    "配置:",
+    "onboard / 配置 - 查看当前配置和重新配置入口",
+    "终端运行: node scripts/onboard.mjs",
+  ];
+  if (config.channel === "feishu") {
+    lines.push("", "群聊使用: @bot list；私聊可直接发送 list。");
+  }
+  return lines.join("\n");
+}
+
+function formatOnboardStatus() {
+  const config = currentRuntimeConfig();
+  const lines = [
+    `${channelDisplayName(config)} onboard`,
+    `通道: ${config.channel}${config.platform ? `/${normalizeFeishuPlatform(config.platform)}` : ""}`,
+    `账号: ${config.account || "default"}`,
+    `Bot: ${config.bot || "default"}`,
+    `配置文件: ${config.configPath || "(unknown)"}`,
+    `状态目录: ${config.stateDir || "(unknown)"}`,
+    "",
+    "重新配置:",
+    config.channel === "feishu"
+      ? `node scripts/onboard.mjs --channel feishu --platform ${normalizeFeishuPlatform(config.platform)} --account ${config.account || "default"} --bot ${config.bot || "codex-main"}`
+      : "node scripts/onboard.mjs --channel weixin",
+  ];
+  return lines.join("\n");
+}
+
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
   const taskKeyword = "(?:task|任务)";
+  if (/^(?:help|帮助|\?)$/iu.test(trimmed)) return { type: "help" };
+  if (/^(?:onboard|配置|设置)$/iu.test(trimmed)) return { type: "onboard" };
   if (/^任务$/u.test(trimmed)) return { type: "monitor-tasks" };
   if (/^进度$/u.test(trimmed)) return { type: "monitor-progress" };
   if (/^状态$/u.test(trimmed)) return { type: "monitor-status" };
@@ -3019,6 +3073,8 @@ function parseCommand(text) {
 
 async function handleText(text, fromUser, config, options = {}) {
   const command = parseCommand(text);
+  if (command.type === "help") return formatHelp();
+  if (command.type === "onboard") return formatOnboardStatus();
   if (command.type === "monitor-tasks") return config.channel === "weixin" ? formatTaskOverview(fromUser) : formatList(fromUser);
   if (command.type === "monitor-progress") return config.channel === "weixin" ? formatTaskProgress(fromUser) : formatChannelProgress(fromUser);
   if (command.type === "monitor-status") return config.channel === "weixin" ? formatSystemStatus() : formatChannelStatus();
@@ -3157,6 +3213,34 @@ function writeChannelStatus(config, status, details = {}) {
   });
 }
 
+function rememberFeishuNotifyTarget(config, message) {
+  if (config.channel !== "feishu" || !config.loadedNotifierConfig || !message.chatId) return;
+  try {
+    const platform = normalizeFeishuPlatform(config.platform);
+    upsertFeishuNotifyTarget(config.loadedNotifierConfig, config, {
+      id: "default",
+      chatId: message.chatId,
+      enabled: true,
+      platform,
+      label: `${platform}/${config.account}/${config.bot}`,
+    });
+    const existing = Array.isArray(config.notifyTargets) ? config.notifyTargets : [];
+    const nextTarget = {
+      id: "default",
+      chatId: message.chatId,
+      enabled: true,
+      platform,
+      label: `${platform}/${config.account}/${config.bot}`,
+    };
+    const index = existing.findIndex((item) => String(item.id || "") === "default" || String(item.chatId || "") === String(message.chatId));
+    if (index >= 0) existing[index] = { ...existing[index], ...nextTarget };
+    else existing.push(nextTarget);
+    config.notifyTargets = existing;
+  } catch (error) {
+    appendRouterError(config, `Failed to remember Feishu notify target: ${error.stack || error.message}`);
+  }
+}
+
 async function processFeishuMessage(message, config, channel, args) {
   const conversation = feishuConversationKey(message);
   const replyConfig = feishuReplyConfig(config, message);
@@ -3169,7 +3253,10 @@ async function processFeishuMessage(message, config, channel, args) {
     args,
     suppressDispatchReply: true,
   });
-  if (String(response || "").trim()) await sendTextWithMedia(response, replyConfig, args);
+  if (String(response || "").trim()) {
+    await sendTextWithMedia(response, replyConfig, args);
+    rememberFeishuNotifyTarget(config, message);
+  }
 }
 
 export async function startFeishuBot(config, args = {}, options = {}) {
@@ -3230,6 +3317,7 @@ function loadSelectedRuntimeConfigs(args, options = {}) {
   const channel = args.channel || (options.allChannels ? "" : options.defaultChannel || "weixin");
   const matches = listBotConfigs(loaded, {
     channel,
+    platform: args.platform || args.brand,
     account: args.account,
     bot: args.bot,
   });
@@ -3240,10 +3328,11 @@ function loadSelectedRuntimeConfigs(args, options = {}) {
   });
   const feishuApps = new Map();
   for (const config of configs.filter((item) => item.channel === "feishu" && item.appId)) {
-    if (feishuApps.has(config.appId)) {
-      config.startupError = `Feishu appId ${config.appId} is already assigned to ${feishuApps.get(config.appId)}; each application may have only one long connection.`;
+    const appKey = `${normalizeFeishuPlatform(config.platform)}:${config.appId}`;
+    if (feishuApps.has(appKey)) {
+      config.startupError = `${normalizeFeishuPlatform(config.platform)} appId ${config.appId} is already assigned to ${feishuApps.get(appKey)}; each application may have only one long connection.`;
     } else {
-      feishuApps.set(config.appId, config.namespace);
+      feishuApps.set(appKey, config.namespace);
     }
   }
   return configs;

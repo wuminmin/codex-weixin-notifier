@@ -11,12 +11,13 @@ Use this skill when the user wants Codex to pair Weixin, configure one or more F
 
 The plugin separates a shared task/notification core from channel transports:
 
-- `scripts/codex-command-router.mjs` starts all enabled Weixin and Feishu adapters in one process.
+- `scripts/onboard.mjs` is the first-run setup entry for Weixin, Feishu China, and Lark international.
+- `scripts/codex-command-router.mjs` starts all enabled Weixin and Feishu/Lark adapters in one process.
 - `scripts/notify.mjs` fans completion events out to the configured Weixin destination and all enabled Feishu `notifyTargets`; a per-target failure does not stop the remaining sends, but makes the final exit status nonzero.
 - `~/.codex/codex-notifier.json` is the general config. Explicit `--config` / `CODEX_NOTIFIER_CONFIG` wins, followed by the general config, then the legacy Weixin config.
 - Legacy `~/.codex/weixin-notifier.json` is mapped in place to `weixin/default/default`; no key or state migration is required.
-- Each Feishu `{account, bot}` owns an independent task list, task 0, attachment tree, state namespace, and stable-hash tmux prefix. Conversations inside that bot share its task pool, while the selected current task is stored by `chatId`.
-- Feishu uses the official `@larksuiteoapi/node-sdk` Channel for WebSocket reconnect, group `@bot` policy, message normalization, deduplication, per-chat ordering, native Markdown splitting, reply/thread context, and media transfer.
+- Each Feishu/Lark `{platform, account, bot}` owns an independent task list, task 0, attachment tree, state namespace, and stable-hash tmux prefix. Conversations inside that bot share its task pool, while the selected current task is stored by `chatId`.
+- Feishu/Lark uses the official `@larksuiteoapi/node-sdk` Channel for WebSocket reconnect, group `@bot` policy, message normalization, deduplication, per-chat ordering, native Markdown splitting, reply/thread context, and media transfer.
 
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
 - `scripts/notify-weixin.mjs` is the Weixin-only compatibility sender. It renders completion notifications as terminal-style long PNG images by default; set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies.
@@ -35,27 +36,39 @@ The plugin separates a shared task/notification core from channel transports:
 - Secrets are read from `~/.codex/weixin-notifier.json` or environment variables, never from prompts.
 - Transport is an HTTP adapter shaped from the Tencent iLink API used by `@tencent-weixin/openclaw-weixin`; it does not require running OpenClaw.
 
-## Feishu Setup
+## Onboard
 
-Configure each Feishu China-domain enterprise self-built application bot separately; Lark international tenants are not supported in this release. Manual mode prompts for the App Secret without placing it in shell history:
+Use the unified first-run flow after install or whenever the user wants to reconfigure:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
-  --account company-a --bot codex-main --mode manual
+node /path/to/codex-weixin-notifier/scripts/onboard.mjs
+node /path/to/codex-weixin-notifier/scripts/onboard.mjs --help
+node /path/to/codex-weixin-notifier/scripts/onboard.mjs --channel feishu --platform lark --mode qr
 ```
 
-QR mode uses the official SDK application registration flow and requests bot identity, private-message receive, group `@bot` receive, send-as-bot, media, and `im.message.receive_v1` capabilities:
+The supported CLI names are `weixin`, `feishu`, and `lark` as a Feishu platform. Short aliases may parse for compatibility, but user-facing instructions should prefer standard names. Onboard starts or restarts the router and treats receiving `task 0 [default,current]` after sending `list` as success. For Feishu/Lark, the first successful chat reply is saved as the default `notifyTargets` entry.
+
+## Feishu and Lark Setup
+
+Configure each Feishu or Lark enterprise self-built application bot separately. Manual mode prompts for the App Secret without placing it in shell history:
 
 ```bash
 node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
-  --account company-a --bot codex-main --mode qr
+  --account company-a --bot codex-main --platform feishu --mode manual
 ```
 
-After scanning or entering credentials, ensure the app is published, permissions are approved, long-connection events are enabled, and the bot is added to target groups. Then validate:
+QR mode uses the official SDK application registration flow and requests bot identity, private-message receive, group `@bot` receive, send-as-bot, media, and `im.message.receive_v1` capabilities. Use `--platform lark` for Lark international:
 
 ```bash
 node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
-  --account company-a --bot codex-main --check
+  --account company-a --bot codex-main --platform lark --mode qr
+```
+
+After scanning or entering credentials, ensure the app is published, permissions are approved, long-connection events are enabled, and the bot is added to target groups. Then validate with the matching platform:
+
+```bash
+node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
+  --account company-a --bot codex-main --platform lark --check
 ```
 
 The config file is written with mode `0600`. Repeat setup for more accounts or bots, then start every enabled adapter with:
@@ -64,7 +77,7 @@ The config file is written with mode `0600`. Repeat setup for more accounts or b
 /path/to/codex-weixin-notifier/scripts/start-router-tmux.sh --restart
 ```
 
-Feishu DMs are accepted directly. Group messages must explicitly mention the current bot; when multiple configured bots are in one group, each reacts only to its own mention. Replies are associated with the inbound message, and topic messages remain in the same topic. Feishu text stays native Markdown/rich text; only `task snap` and explicit image media are PNGs.
+Feishu/Lark DMs are accepted directly. Group messages must explicitly mention the current bot; when multiple configured bots are in one group, each reacts only to its own mention. Replies are associated with the inbound message, and topic messages remain in the same topic. Feishu/Lark text stays native Markdown/rich text; only `task snap` and explicit image media are PNGs.
 
 General notification examples:
 
@@ -73,7 +86,7 @@ node /path/to/codex-weixin-notifier/scripts/notify.mjs --dry-run \
   --task "Smoke test" --summary "Fan-out formatting test"
 
 node /path/to/codex-weixin-notifier/scripts/notify.mjs \
-  --channel feishu --account company-a --bot codex-main --target ops \
+  --channel feishu --platform lark --account company-a --bot codex-main --target ops \
   --task "Codex finished"
 ```
 

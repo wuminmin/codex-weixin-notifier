@@ -139,6 +139,12 @@ function selectorMatches(actual, expected) {
   return !expected || String(actual) === String(expected);
 }
 
+export function normalizeFeishuPlatform(value) {
+  const normalized = String(value || "feishu").trim().toLowerCase();
+  if (normalized === "lark") return "lark";
+  return "feishu";
+}
+
 export function listBotConfigs(loaded, selectors = {}) {
   const general = loaded?.config || loaded || {};
   const results = [];
@@ -148,6 +154,8 @@ export function listBotConfigs(loaded, selectors = {}) {
       if (!selectorMatches(accountName, selectors.account)) continue;
       for (const [botName, botValue] of Object.entries(nonEmptyObject(accountValue?.bots))) {
         if (!selectorMatches(botName, selectors.bot)) continue;
+        const platform = channelName === "feishu" ? normalizeFeishuPlatform(botValue?.platform) : "";
+        if (!selectorMatches(platform, selectors.platform)) continue;
         if (!selectors.includeDisabled && botValue?.enabled === false) continue;
         results.push({
           ...nonEmptyObject(general.defaults),
@@ -155,6 +163,7 @@ export function listBotConfigs(loaded, selectors = {}) {
           ...nonEmptyObject(accountValue?.defaults),
           ...nonEmptyObject(botValue),
           enabled: botValue?.enabled !== false,
+          ...(channelName === "feishu" ? { platform } : {}),
           channel: channelName,
           account: accountName,
           bot: botName,
@@ -183,7 +192,14 @@ export function stableContextHash(context, length = 10) {
 }
 
 export function contextNamespace(context) {
-  return [context.channel || "unknown", context.account || "default", context.bot || "default"].join("/");
+  const channel = context.channel || "unknown";
+  const platform = channel === "feishu" ? normalizeFeishuPlatform(context.platform) : "";
+  return [
+    channel,
+    platform === "lark" ? platform : "",
+    context.account || "default",
+    context.bot || "default",
+  ].filter(Boolean).join("/");
 }
 
 export function runtimeConfigForBot(botConfig, options = {}) {
@@ -208,6 +224,7 @@ export function runtimeConfigForBot(botConfig, options = {}) {
   );
   return {
     ...botConfig,
+    ...(botConfig.channel === "feishu" ? { platform: normalizeFeishuPlatform(botConfig.platform) } : {}),
     stateDir,
     taskRoot,
     namespace: contextNamespace(botConfig),
@@ -220,10 +237,10 @@ export function runtimeConfigForBot(botConfig, options = {}) {
 export function selectBotConfig(loaded, selectors = {}) {
   const matches = listBotConfigs(loaded, selectors);
   if (matches.length === 0) {
-    throw new Error(`No enabled notifier bot matched channel=${selectors.channel || "*"} account=${selectors.account || "*"} bot=${selectors.bot || "*"}`);
+    throw new Error(`No enabled notifier bot matched channel=${selectors.channel || "*"} platform=${selectors.platform || "*"} account=${selectors.account || "*"} bot=${selectors.bot || "*"}`);
   }
   if (matches.length > 1) {
-    throw new Error("More than one notifier bot matched; specify --channel, --account, and --bot.");
+    throw new Error("More than one notifier bot matched; specify --channel, --platform, --account, and --bot.");
   }
   return runtimeConfigForBot(matches[0], { home: loaded.home });
 }
@@ -268,6 +285,35 @@ export function upsertFeishuBotConfig(loaded, accountName, botName, botValue) {
   };
   if (!Array.isArray(nextBot.notifyTargets)) nextBot.notifyTargets = [];
   account.bots[botName] = nextBot;
+  writeSecureJson(configPath, current, { home: loaded.home });
+  return configPath;
+}
+
+export function upsertFeishuNotifyTarget(loaded, selectors, target) {
+  const configPath = loaded.sourceFormat === "general"
+    ? loaded.configPath
+    : expandHome(GENERAL_CONFIG_PATH, loaded.home);
+  const current = readJsonFile(configPath, { version: 1, defaults: {}, channels: {} }, { home: loaded.home });
+  const account = current.channels?.feishu?.accounts?.[selectors.account];
+  const bot = account?.bots?.[selectors.bot];
+  if (!bot) throw new Error(`Feishu bot config not found: ${selectors.account}/${selectors.bot}`);
+  const chatId = String(target?.chatId || "").trim();
+  if (!chatId) throw new Error("Missing Feishu chatId for notify target.");
+  const id = String(target.id || "default").trim() || "default";
+  const existing = Array.isArray(bot.notifyTargets) ? bot.notifyTargets : [];
+  const index = existing.findIndex((item) => String(item.chatId || "") === chatId || String(item.id || "") === id);
+  const nextTarget = {
+    ...(index >= 0 ? existing[index] : {}),
+    id,
+    chatId,
+    enabled: target.enabled !== false,
+    ...(target.label ? { label: String(target.label) } : {}),
+    ...(target.platform ? { platform: normalizeFeishuPlatform(target.platform) } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  if (index >= 0) existing[index] = nextTarget;
+  else existing.push(nextTarget);
+  bot.notifyTargets = existing;
   writeSecureJson(configPath, current, { home: loaded.home });
   return configPath;
 }

@@ -45,3 +45,27 @@ test("fan-out is best effort and reports partial failure", async () => {
   assert.equal(results.filter((item) => item.ok).length, 2);
   assert.equal(results.filter((item) => !item.ok)[0].label, "feishu/a/one/ops");
 });
+
+test("notification target selection can filter Lark platform bots", () => {
+  const platformLoaded = {
+    home: "/tmp",
+    configPath: "/tmp/config.json",
+    sourceFormat: "general",
+    config: {
+      channels: {
+        feishu: {
+          accounts: {
+            a: { bots: {
+              china: { appId: "cli_cn", appSecret: "s", notifyTargets: [{ id: "cn", chatId: "oc_cn" }] },
+              global: { platform: "lark", appId: "cli_global", appSecret: "s", notifyTargets: [{ id: "global", chatId: "oc_global" }] },
+            } },
+          },
+        },
+      },
+    },
+  };
+  const targets = notificationTargets(platformLoaded, { channel: "feishu", platform: "lark" });
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].bot, "global");
+  assert.equal(targets[0].platform, "lark");
+});

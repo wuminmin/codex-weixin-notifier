@@ -10,6 +10,7 @@ import {
   runtimeConfigForBot,
   stableContextHash,
   updateBotConfig,
+  upsertFeishuNotifyTarget,
 } from "../scripts/lib/notifier-config.mjs";
 
 function tempHome() {
@@ -109,4 +110,55 @@ test("filters enabled bots by channel, account, and bot", () => {
   assert.equal(listBotConfigs(loaded, { channel: "feishu" }).length, 2);
   assert.deepEqual(listBotConfigs(loaded, { channel: "feishu", account: "a" }).map((item) => item.bot), ["one"]);
   assert.equal(listBotConfigs(loaded, { channel: "feishu", account: "a", includeDisabled: true }).length, 2);
+});
+
+test("filters Feishu bots by platform while defaulting old configs to Feishu", () => {
+  const loaded = {
+    home: tempHome(),
+    configPath: "/tmp/test.json",
+    sourceFormat: "general",
+    config: {
+      channels: {
+        feishu: {
+          accounts: {
+            a: { bots: {
+              china: { enabled: true },
+              global: { enabled: true, platform: "lark" },
+            } },
+          },
+        },
+      },
+    },
+  };
+  assert.deepEqual(listBotConfigs(loaded, { channel: "feishu", platform: "feishu" }).map((item) => item.bot), ["china"]);
+  assert.deepEqual(listBotConfigs(loaded, { channel: "feishu", platform: "lark" }).map((item) => item.bot), ["global"]);
+  assert.equal(runtimeConfigForBot(listBotConfigs(loaded, { bot: "global" })[0], { home: loaded.home }).namespace, "feishu/lark/a/global");
+});
+
+test("upserts a default Feishu notify target after first successful chat reply", () => {
+  const home = tempHome();
+  const configPath = path.join(home, ".codex", "codex-notifier.json");
+  writeJson(configPath, {
+    version: 1,
+    channels: {
+      feishu: {
+        accounts: {
+          a: { bots: { global: { platform: "lark", appId: "cli_lark", appSecret: "s" } } },
+        },
+      },
+    },
+  });
+  const loaded = loadNotifierConfig({ home });
+  upsertFeishuNotifyTarget(loaded, { account: "a", bot: "global" }, {
+    id: "default",
+    chatId: "oc_lark",
+    platform: "lark",
+  });
+  const updated = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.deepEqual(updated.channels.feishu.accounts.a.bots.global.notifyTargets.map((item) => ({
+    id: item.id,
+    chatId: item.chatId,
+    platform: item.platform,
+    enabled: item.enabled,
+  })), [{ id: "default", chatId: "oc_lark", platform: "lark", enabled: true }]);
 });

@@ -8,6 +8,7 @@ import { createFeishuChannel } from "./lib/feishu-channel.mjs";
 import {
   listBotConfigs,
   loadNotifierConfig,
+  normalizeFeishuPlatform,
   runtimeConfigForBot,
   upsertFeishuBotConfig,
 } from "./lib/notifier-config.mjs";
@@ -34,11 +35,13 @@ const FEISHU_ADDONS = {
 function usage() {
   return [
     "Usage:",
-    "  node scripts/setup-feishu.mjs --account NAME --bot NAME --mode manual [--config PATH]",
-    "  node scripts/setup-feishu.mjs --account NAME --bot NAME --mode qr [--config PATH]",
-    "  node scripts/setup-feishu.mjs --account NAME --bot NAME --check [--config PATH]",
+    "  node scripts/setup-feishu.mjs --account NAME --bot NAME --platform feishu --mode manual [--config PATH]",
+    "  node scripts/setup-feishu.mjs --account NAME --bot NAME --platform feishu --mode qr [--config PATH]",
+    "  node scripts/setup-feishu.mjs --account NAME --bot NAME --platform lark --mode manual [--config PATH]",
+    "  node scripts/setup-feishu.mjs --account NAME --bot NAME --platform lark --mode qr [--config PATH]",
+    "  node scripts/setup-feishu.mjs --account NAME --bot NAME --check [--platform feishu|lark] [--config PATH]",
     "",
-    "Manual mode prompts for App ID and a hidden App Secret. QR mode uses the official Feishu SDK app-registration flow.",
+    "Manual mode prompts for App ID and a hidden App Secret. QR mode uses the official Feishu/Lark SDK app-registration flow.",
   ].join("\n");
 }
 
@@ -106,18 +109,31 @@ async function manualCredentials(options = {}) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let appId;
   try {
-    appId = (await rl.question("Feishu App ID: ")).trim();
+    appId = (await rl.question(`${options.label || "Feishu"} App ID: `)).trim();
   } finally {
     rl.close();
   }
-  const appSecret = await hiddenQuestion("Feishu App Secret (hidden): ");
+  const appSecret = await hiddenQuestion(`${options.label || "Feishu"} App Secret (hidden): `);
   return { appId, appSecret };
 }
 
-async function qrCredentials(account, bot, options = {}) {
+function platformLabel(platform) {
+  return normalizeFeishuPlatform(platform) === "lark" ? "Lark" : "Feishu";
+}
+
+function registerDomains(platform) {
+  const normalized = normalizeFeishuPlatform(platform);
+  if (normalized === "lark") return { domain: "accounts.larksuite.com", larkDomain: "accounts.larksuite.com" };
+  return { domain: "accounts.feishu.cn", larkDomain: "accounts.larksuite.com" };
+}
+
+async function qrCredentials(account, bot, platform, options = {}) {
   const sdk = options.sdk || lark;
   const registerApp = options.registerApp || sdk.registerApp;
+  const normalizedPlatform = normalizeFeishuPlatform(platform);
+  const label = platformLabel(normalizedPlatform);
   const result = await registerApp({
+    ...registerDomains(normalizedPlatform),
     source: "codex-notifier",
     createOnly: true,
     appPreset: {
@@ -126,27 +142,28 @@ async function qrCredentials(account, bot, options = {}) {
     },
     addons: FEISHU_ADDONS,
     onQRCodeReady(info) {
-      process.stdout.write(`Open this Feishu link (expires in ${info.expireIn}s):\n${info.url}\n`);
+      process.stdout.write(`Open this ${label} link (expires in ${info.expireIn}s):\n${info.url}\n`);
       qrcode.generate(info.url, { small: true });
     },
     onStatusChange(info) {
       if (info.status !== "polling") process.stdout.write(`Registration status: ${info.status}\n`);
     },
   });
-  if (result.user_info?.tenant_brand === "lark") {
-    throw new Error("This release supports Feishu China tenants only; Lark tenants are not yet supported.");
+  const tenantBrand = normalizeFeishuPlatform(result.user_info?.tenant_brand || normalizedPlatform);
+  if (tenantBrand !== normalizedPlatform) {
+    throw new Error(`Scanned tenant is ${platformLabel(tenantBrand)}, but --platform ${normalizedPlatform} was selected. Re-run setup with --platform ${tenantBrand}.`);
   }
-  return { appId: result.client_id, appSecret: result.client_secret };
+  return { appId: result.client_id, appSecret: result.client_secret, tenantBrand };
 }
 
-async function checkBot(loaded, account, bot, options = {}) {
-  const matches = listBotConfigs(loaded, { channel: "feishu", account, bot, includeDisabled: true });
+async function checkBot(loaded, account, bot, platform, options = {}) {
+  const matches = listBotConfigs(loaded, { channel: "feishu", platform, account, bot, includeDisabled: true });
   if (matches.length !== 1) throw new Error(`Feishu bot not found: ${account}/${bot}`);
   const config = runtimeConfigForBot(matches[0], { home: loaded.home });
   const channel = options.channel || createFeishuChannel(config, { sdk: options.sdk });
   await channel.connect();
   try {
-    process.stdout.write(`ok feishu/${account}/${bot} appId=${config.appId} bot=${channel.botIdentity?.name || "unknown"} openId=${channel.botIdentity?.openId || "unknown"}\n`);
+    process.stdout.write(`ok ${normalizeFeishuPlatform(config.platform)}/${account}/${bot} appId=${config.appId} bot=${channel.botIdentity?.name || "unknown"} openId=${channel.botIdentity?.openId || "unknown"}\n`);
   } finally {
     await channel.disconnect();
   }
@@ -161,17 +178,19 @@ export async function runSetupFeishu(argv = process.argv.slice(2), options = {})
   }
   const account = args.account;
   const bot = args.bot;
+  const platform = normalizeFeishuPlatform(args.platform || args.brand || "feishu");
   if (!validName(account) || !validName(bot)) {
     throw new Error("--account and --bot are required and may contain letters, numbers, dot, underscore, or hyphen.");
   }
   const loaded = loadNotifierConfig({ configPath: args.config || process.env.CODEX_NOTIFIER_CONFIG });
-  if (args.check === "true") return checkBot(loaded, account, bot, options);
+  if (args.check === "true") return checkBot(loaded, account, bot, args.platform || args.brand ? platform : undefined, options);
 
   const mode = args.mode || "manual";
+  const label = platformLabel(platform);
   const credentials = mode === "manual"
-    ? await manualCredentials(options)
+    ? await manualCredentials({ ...options, label })
     : mode === "qr"
-      ? await qrCredentials(account, bot, options)
+      ? await qrCredentials(account, bot, platform, options)
       : null;
   if (!credentials) throw new Error("--mode must be manual or qr.");
   if (!/^cli_[A-Za-z0-9]+$/u.test(credentials.appId || "")) throw new Error("Invalid Feishu App ID.");
@@ -179,12 +198,13 @@ export async function runSetupFeishu(argv = process.argv.slice(2), options = {})
 
   const configPath = upsertFeishuBotConfig(loaded, account, bot, {
     enabled: true,
+    platform,
     appId: credentials.appId,
     appSecret: credentials.appSecret,
   });
-  process.stdout.write(`Saved feishu/${account}/${bot} to ${configPath} with mode 0600.\n`);
-  process.stdout.write("Publish the app, approve requested permissions, enable long-connection events, and add the bot to target groups.\n");
-  return { configPath, account, bot };
+  process.stdout.write(`Saved ${platform}/${account}/${bot} to ${configPath} with mode 0600.\n`);
+  process.stdout.write(`Publish the ${label} app, approve requested permissions, enable long-connection events, and add the bot to target groups.\n`);
+  return { configPath, account, bot, platform };
 }
 
 if (process.argv[1]?.endsWith("setup-feishu.mjs")) {

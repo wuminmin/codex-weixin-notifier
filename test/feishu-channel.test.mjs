@@ -71,6 +71,25 @@ test("Channel policy accepts DMs and requires the current bot mention in groups"
   assert.equal(options.safety.chatQueue.enabled, true);
 });
 
+test("Lark platform uses the SDK Lark domain", () => {
+  let options;
+  createFeishuChannel({
+    account: "a",
+    bot: "global",
+    platform: "lark",
+    appId: "cli_lark",
+    appSecret: "secret",
+    notifierHome: "/tmp",
+  }, {
+    sdk: {
+      Domain: { Feishu: "feishu", Lark: "lark" },
+      LoggerLevel: { info: "info" },
+      createLarkChannel(value) { options = value; return { value }; },
+    },
+  });
+  assert.equal(options.domain, "lark");
+});
+
 test("inbound duplicate is queued once and topic reply keeps message context", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feishu-inbound-"));
   const config = {

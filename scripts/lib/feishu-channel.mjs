@@ -13,17 +13,33 @@ function loggerLevel(config, sdk = lark) {
   return sdk.LoggerLevel?.[requested] ?? sdk.LoggerLevel?.info;
 }
 
+export function feishuPlatform(config = {}) {
+  return String(config.platform || "feishu").toLowerCase() === "lark" ? "lark" : "feishu";
+}
+
+export function feishuPlatformLabel(config = {}) {
+  return feishuPlatform(config) === "lark" ? "Lark" : "Feishu";
+}
+
+export function feishuDomain(config = {}, sdk = lark) {
+  if (config.domain) return config.domain;
+  return feishuPlatform(config) === "lark"
+    ? sdk.Domain?.Lark
+    : sdk.Domain?.Feishu;
+}
+
 export function createFeishuChannel(config, options = {}) {
   const sdk = options.sdk || lark;
-  if (!config.appId) throw new Error(`Missing Feishu appId for ${config.account}/${config.bot}`);
-  if (!config.appSecret) throw new Error(`Missing Feishu appSecret for ${config.account}/${config.bot}`);
+  const label = feishuPlatformLabel(config);
+  if (!config.appId) throw new Error(`Missing ${label} appId for ${config.account}/${config.bot}`);
+  if (!config.appSecret) throw new Error(`Missing ${label} appSecret for ${config.account}/${config.bot}`);
   const mediaRoots = Array.isArray(config.mediaRoots) && config.mediaRoots.length
     ? config.mediaRoots
     : [config.notifierHome, "/tmp"].filter(Boolean);
   return sdk.createLarkChannel({
     appId: config.appId,
     appSecret: config.appSecret,
-    domain: sdk.Domain?.Feishu,
+    domain: feishuDomain(config, sdk),
     loggerLevel: loggerLevel(config, sdk),
     source: "codex-notifier",
     includeRawEvent: false,
@@ -69,9 +85,10 @@ export function feishuReplyOptions(config = {}) {
 
 export async function sendFeishuMarkdown(text, config, options = {}) {
   const target = options.chatId || config.toChat || config.chatId;
-  if (!target) throw new Error(`Missing Feishu chatId for ${config.account}/${config.bot}`);
+  const label = feishuPlatformLabel(config);
+  if (!target) throw new Error(`Missing ${label} chatId for ${config.account}/${config.bot}`);
   if (config.dryRun || options.dryRun) {
-    process.stdout.write(`[dry-run feishu ${config.account}/${config.bot} -> ${target}]\n${text}\n`);
+    process.stdout.write(`[dry-run ${feishuPlatform(config)} ${config.account}/${config.bot} -> ${target}]\n${text}\n`);
     return { messageId: "dry-run" };
   }
   const channel = getFeishuChannel(config, options);
@@ -84,12 +101,13 @@ export async function sendFeishuMarkdown(text, config, options = {}) {
 
 export async function sendFeishuMedia(filePath, config, options = {}) {
   const target = options.chatId || config.toChat || config.chatId;
-  if (!target) throw new Error(`Missing Feishu chatId for ${config.account}/${config.bot}`);
+  const label = feishuPlatformLabel(config);
+  if (!target) throw new Error(`Missing ${label} chatId for ${config.account}/${config.bot}`);
   const resolved = path.resolve(filePath);
   const stat = fs.statSync(resolved);
-  if (!stat.isFile()) throw new Error(`Feishu media path is not a file: ${resolved}`);
+  if (!stat.isFile()) throw new Error(`${label} media path is not a file: ${resolved}`);
   if (config.dryRun || options.dryRun) {
-    process.stdout.write(`[dry-run feishu media ${config.account}/${config.bot} -> ${target}] ${resolved} ${stat.size} bytes\n`);
+    process.stdout.write(`[dry-run ${feishuPlatform(config)} media ${config.account}/${config.bot} -> ${target}] ${resolved} ${stat.size} bytes\n`);
     return { messageId: "dry-run-media" };
   }
   const channel = getFeishuChannel(config, options);
