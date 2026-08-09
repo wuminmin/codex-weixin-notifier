@@ -614,9 +614,10 @@ function formatViewBlock(view, options = {}) {
 export function formatTaskOverview(fromUser = "") {
   const { routerTasks, localSessions } = allTaskViews();
   const currentTask = currentTaskId(fromUser);
+  const visibleRouterTasks = routerTasks.filter((task) => task.status !== "closed");
   const completedToday = localSessions.filter((session) => endedToday(session));
   const activeLocal = localSessions.filter((session) => isFreshActive(session));
-  const visible = [...routerTasks, ...activeLocal, ...completedToday];
+  const visible = [...visibleRouterTasks, ...activeLocal, ...completedToday];
   const activeCount = visible.filter((view) => ACTIVE_STATUSES.has(view.status)).length;
   const header = [
     `任务概览 · ${visible.length} 个（活动 ${activeCount}）`,
