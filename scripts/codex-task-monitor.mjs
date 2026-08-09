@@ -15,6 +15,9 @@ const ROUTER_TASKS_PATH = path.join(STATE_DIR, "tasks.json");
 const CURRENT_TASK_PATH = path.join(STATE_DIR, "current-task.json");
 const CONFIG_PATH = path.join(CODEX_HOME, "config.toml");
 const TRANSCRIPT_ROOT = path.join(CODEX_HOME, "sessions");
+const CLAUDE_HOME = process.env.CLAUDE_HOME || path.join(os.homedir(), ".claude");
+const CLAUDE_PROJECTS_ROOT = path.join(CLAUDE_HOME, "projects");
+const OPENCODE_DB = process.env.OPENCODE_DB || path.join(os.homedir(), ".local", "share", "opencode", "opencode.db");
 const ACTIVE_STATUSES = new Set(["running", "starting", "queued", "waiting"]);
 const RECENT_SESSION_MS = 24 * 60 * 60 * 1000;
 const FALLBACK_ACTIVE_WINDOW_MS = 30 * 60 * 1000;
@@ -341,6 +344,194 @@ function discoverVscodeSessions() {
   return sessions;
 }
 
+function decodeClaudeProjectDir(name) {
+  return name.replace(/^-/, "/").replace(/-/g, "/");
+}
+
+function discoverClaudeSessions() {
+  if (!fs.existsSync(CLAUDE_PROJECTS_ROOT)) return [];
+  const cutoff = Date.now() - RECENT_SESSION_MS * 2;
+  const sessions = [];
+  let projectDirs;
+  try {
+    projectDirs = fs.readdirSync(CLAUDE_PROJECTS_ROOT, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory());
+  } catch {
+    return [];
+  }
+  for (const projectDir of projectDirs) {
+    const projectPath = path.join(CLAUDE_PROJECTS_ROOT, projectDir.name);
+    let entries;
+    try {
+      entries = fs.readdirSync(projectPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const filePath = path.join(projectPath, entry.name);
+      let stat;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        continue;
+      }
+      if (stat.mtimeMs < cutoff) continue;
+      const session = parseClaudeTranscript(filePath, stat, projectDir.name);
+      if (session) sessions.push(session);
+    }
+  }
+  return sessions
+    .sort((left, right) => timestampMs(right.updatedAt) - timestampMs(left.updatedAt))
+    .slice(0, MAX_DISCOVERED_SESSIONS);
+}
+
+function parseClaudeTranscript(filePath, stat, projectDirName) {
+  const text = readTranscriptTail(filePath, stat.size);
+  const lines = text.split(/\r?\n/u).filter(Boolean);
+  let sessionId = path.basename(filePath, ".jsonl");
+  let cwd = "";
+  let lastPrompt = "";
+  let lastAssistant = "";
+  let lastUserInputTs = "";
+  let lastAssistantTs = "";
+  let firstTs = "";
+  let lastTs = "";
+  let lastEvent = null;
+  let stageText = "等待新指令";
+  for (const line of lines) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const ts = safeTimestamp(entry.timestamp, "");
+    if (ts) {
+      if (!firstTs) firstTs = ts;
+      lastTs = ts;
+    }
+    if (entry.cwd && !cwd) cwd = entry.cwd;
+    if (entry.sessionId) sessionId = entry.sessionId;
+    if (entry.type === "last-prompt" && entry.lastPrompt) {
+      const trimmed = String(entry.lastPrompt).trim();
+      if (trimmed && !isInternalUserMessage(trimmed)) lastPrompt = compact(trimmed, 240);
+    } else if (entry.type === "user" && entry.message) {
+      const content = entry.message.content;
+      if (typeof content === "string") {
+        if (!isInternalUserMessage(content)) {
+          lastPrompt = compact(content, 240);
+          lastUserInputTs = ts;
+          stageText = "分析处理中";
+        }
+      }
+      lastEvent = "user";
+    } else if (entry.type === "assistant" && entry.message) {
+      const content = entry.message.content;
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (c.type === "text" && c.text) {
+            lastAssistant = compact(c.text, 320);
+            stageText = "本轮已完成";
+          } else if (c.type === "tool_use") {
+            stageText = summarizeClaudeToolUse(c);
+          }
+        }
+      }
+      lastAssistantTs = ts;
+      lastEvent = "assistant";
+    }
+  }
+  if (!cwd) cwd = decodeClaudeProjectDir(projectDirName);
+  const running = lastUserInputTs && timestampMs(lastUserInputTs) >= timestampMs(lastAssistantTs)
+    && Date.now() - stat.mtimeMs <= FALLBACK_ACTIVE_WINDOW_MS;
+  return {
+    sessionId,
+    source: "claude",
+    cwd,
+    status: running ? "running" : "completed",
+    stage: running ? stageText : "本轮已完成",
+    prompt: lastPrompt,
+    summary: lastAssistant,
+    createdAt: firstTs,
+    startedAt: lastUserInputTs || firstTs,
+    completedAt: running ? "" : (lastAssistantTs || lastTs),
+    updatedAt: new Date(stat.mtimeMs).toISOString(),
+    transcriptPath: filePath,
+    discovery: "claude-transcript",
+  };
+}
+
+function summarizeClaudeToolUse(call) {
+  const name = String(call?.name || "工具");
+  const input = call?.input || {};
+  if (/^(?:Bash|bash|execute)$/iu.test(name)) return `执行命令 ${compact(input.command || input.cmd, 80)}`.trim();
+  if (/^(?:Read|read_file|view)$/iu.test(name)) return `读取 ${compact(input.file_path || input.path, 80)}`.trim();
+  if (/^(?:Write|write_file|Edit|edit_file|apply_patch|update)$/iu.test(name)) {
+    return `修改 ${compact(input.file_path || input.path, 80)}`.trim();
+  }
+  if (/^(?:Task|subagent|spawn_agent)$/iu.test(name)) return "运行子任务";
+  if (/^(?:WebSearch|web_search|search)$/iu.test(name)) return "查询资料";
+  return `调用 ${name}`;
+}
+
+function sqliteJsonQuery(dbPath, query) {
+  const result = spawnSync("sqlite3", [dbPath, query], { encoding: "utf8", timeout: 3000 });
+  if (result.status !== 0 || !result.stdout) return [];
+  const text = String(result.stdout).trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function discoverOpencodeSessions() {
+  if (!fs.existsSync(OPENCODE_DB)) return [];
+  const cutoff = Date.now() - RECENT_SESSION_MS * 2;
+  const rows = sqliteJsonQuery(
+    OPENCODE_DB,
+    `SELECT json_group_array(json_object(
+       'id', id, 'directory', directory, 'title', title,
+       'time_created', time_created, 'time_updated', time_updated,
+       'time_archived', time_archived, 'time_compacting', time_compacting,
+       'model', model, 'agent', agent
+     )) AS rows
+     FROM session
+     WHERE time_updated >= ${cutoff}
+     ORDER BY time_updated DESC
+     LIMIT ${MAX_DISCOVERED_SESSIONS}`,
+  );
+  const sessions = [];
+  for (const row of rows) {
+    const updatedMs = Number(row.time_updated);
+    if (!Number.isFinite(updatedMs)) continue;
+    const archivedMs = Number(row.time_archived);
+    if (Number.isFinite(archivedMs) && archivedMs > 0) continue;
+    const running = Date.now() - updatedMs <= FALLBACK_ACTIVE_WINDOW_MS;
+    sessions.push({
+      sessionId: row.id,
+      source: "opencode",
+      cwd: row.directory || "",
+      status: running ? "running" : "completed",
+      stage: running ? "分析处理中" : "本轮已完成",
+      prompt: compact(row.title || "", 240),
+      summary: "",
+      createdAt: new Date(Number(row.time_created)).toISOString(),
+      startedAt: "",
+      completedAt: running ? "" : new Date(updatedMs).toISOString(),
+      updatedAt: new Date(updatedMs).toISOString(),
+      transcriptPath: "",
+      discovery: "opencode-sqlite",
+    });
+  }
+  return sessions
+    .sort((left, right) => timestampMs(right.updatedAt) - timestampMs(left.updatedAt))
+    .slice(0, MAX_DISCOVERED_SESSIONS);
+}
+
 function tmuxOutput(args) {
   const result = spawnSync("tmux", args, { encoding: "utf8", timeout: 2000 });
   return result.status === 0 ? String(result.stdout || "").trim() : "";
@@ -397,7 +588,10 @@ function routerTaskView(task) {
 function localSessionViews() {
   const state = readJson(SESSION_STATE_PATH, { sessions: {} });
   const hooked = Object.values(state.sessions || {});
-  const merged = new Map(discoverVscodeSessions().map((session) => [session.sessionId, session]));
+  const merged = new Map();
+  for (const session of discoverVscodeSessions()) merged.set(session.sessionId, session);
+  for (const session of discoverClaudeSessions()) merged.set(session.sessionId, session);
+  for (const session of discoverOpencodeSessions()) merged.set(session.sessionId, session);
   for (const session of hooked) {
     const fallback = merged.get(session.sessionId);
     if (!fallback || timestampMs(session.updatedAt) >= timestampMs(fallback.updatedAt)) {
@@ -433,6 +627,8 @@ function statusLabel(status) {
 
 function sourceLabel(source) {
   if (source === "vscode") return "VS Code";
+  if (source === "claude") return "Claude Code";
+  if (source === "opencode") return "opencode";
   if (source === "weixin") return "微信 CLI";
   return "WSL CLI";
 }
@@ -537,6 +733,8 @@ function parseActivityEvent(line) {
 }
 
 function formatRecentActivity(view, limit = DEFAULT_ACTIVITY_LIMIT) {
+  if (view.source === "claude") return formatClaudeRecentActivity(view, limit);
+  if (view.source === "opencode") return formatOpencodeRecentActivity(view, limit);
   if (!view.transcriptPath) return "";
   let stat;
   try {
@@ -552,6 +750,123 @@ function formatRecentActivity(view, limit = DEFAULT_ACTIVITY_LIMIT) {
   }
   if (events.length === 0) return "";
   const recent = events.slice(-Math.max(1, limit));
+  const body = recent
+    .map((event) => `  · [${event.label}] ${compact(event.text, 100)}`)
+    .join("\n");
+  return `最近活动：\n${body}`;
+}
+
+function parseClaudeActivityEvent(entry) {
+  const ts = timestampMs(entry.timestamp);
+  if (entry.type === "user" && entry.message) {
+    const content = entry.message.content;
+    if (typeof content === "string") {
+      if (isInternalUserMessage(content)) return null;
+      const msg = compact(content, 100);
+      return msg ? { ts, label: "我", text: msg } : null;
+    }
+    return null;
+  }
+  if (entry.type === "assistant" && entry.message) {
+    const content = entry.message.content;
+    if (!Array.isArray(content)) return null;
+    for (const c of content) {
+      if (c.type === "text" && c.text) {
+        return { ts, label: "助手", text: compact(c.text, 200) };
+      }
+    }
+    for (const c of content) {
+      if (c.type === "tool_use") {
+        return { ts, label: "工具", text: summarizeClaudeToolUse(c) };
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
+function formatClaudeRecentActivity(view, limit = DEFAULT_ACTIVITY_LIMIT) {
+  if (!view.transcriptPath) return "";
+  let stat;
+  try {
+    stat = fs.statSync(view.transcriptPath);
+  } catch {
+    return "";
+  }
+  const text = readTranscriptTail(view.transcriptPath, stat.size);
+  const events = [];
+  for (const line of text.split(/\r?\n/u)) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const event = parseClaudeActivityEvent(entry);
+    if (event) events.push(event);
+  }
+  if (events.length === 0) return "";
+  const recent = events.slice(-Math.max(1, limit));
+  const body = recent
+    .map((event) => `  · [${event.label}] ${compact(event.text, 100)}`)
+    .join("\n");
+  return `最近活动：\n${body}`;
+}
+
+function summarizeOpencodePart(data) {
+  if (!data || typeof data !== "object") return null;
+  if (data.type === "text" && data.text) return { label: "助手", text: compact(data.text, 200) };
+  if (data.type === "tool") {
+    const tool = String(data.tool || "工具");
+    const state = data.state || {};
+    const input = state.input || data.input || {};
+    const file = input.filePath || input.path || input.file || input.file_path;
+    if (/^(?:bash|sh|exec|execute)$/iu.test(tool)) return { label: "工具", text: `执行命令 ${compact(input.command || input.cmd, 80)}`.trim() };
+    if (/^(?:read|view|cat)$/iu.test(tool)) return { label: "工具", text: `读取 ${compact(file, 80)}`.trim() };
+    if (/^(?:write|edit|update|apply_patch|str_replace)$/iu.test(tool)) {
+      return { label: "工具", text: `修改 ${compact(file, 80)}`.trim() };
+    }
+    if (/^(?:grep|search)$/iu.test(tool)) return { label: "工具", text: `搜索 ${compact(input.pattern || input.query, 80)}`.trim() };
+    if (/^(?:glob|find)$/iu.test(tool)) return { label: "工具", text: `查找 ${compact(input.pattern || input.path, 80)}`.trim() };
+    if (/^(?:todowrite|todo|update_plan|plan)$/iu.test(tool)) return { label: "计划", text: "更新任务计划" };
+    if (/^(?:task|subagent|spawn_agent|launch)$/iu.test(tool)) return { label: "子任务", text: compact(input.description || input.prompt || "运行子任务", 100) };
+    if (/^(?:webfetch|web_search|web-search-prime_web_search_prime|web-reader_webReader|webfetch)$/iu.test(tool)) {
+      return { label: "工具", text: `查询资料 ${compact(input.url || input.search_query || input.query, 80)}`.trim() };
+    }
+    if (/^(?:question|ask)$/iu.test(tool)) return { label: "等待", text: "等待用户选择" };
+    return { label: "工具", text: `调用 ${tool}` };
+  }
+  return null;
+}
+
+function formatOpencodeRecentActivity(view, limit = DEFAULT_ACTIVITY_LIMIT) {
+  if (!view.sessionId || !fs.existsSync(OPENCODE_DB)) return "";
+  const sid = String(view.sessionId).replace(/'/g, "''");
+  const rows = sqliteJsonQuery(
+    OPENCODE_DB,
+    `SELECT json_group_array(json_object('ts', time_created, 'data', data)) AS rows
+     FROM (
+       SELECT time_created, data FROM part
+       WHERE session_id = '${sid}' AND (data LIKE '%text%' OR data LIKE '%"tool"%')
+       ORDER BY time_created DESC LIMIT ${Math.max(1, limit) * 4}
+     )`,
+  );
+  if (rows.length === 0) return "";
+  const events = [];
+  for (const row of rows) {
+    const ts = Number(row.ts);
+    let data;
+    try {
+      data = JSON.parse(row.data);
+    } catch {
+      continue;
+    }
+    const summary = summarizeOpencodePart(data);
+    if (summary) events.push({ ts, ...summary });
+  }
+  if (events.length === 0) return "";
+  events.sort((left, right) => right.ts - left.ts);
+  const recent = events.slice(0, Math.max(1, limit)).reverse();
   const body = recent
     .map((event) => `  · [${event.label}] ${compact(event.text, 100)}`)
     .join("\n");
