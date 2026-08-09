@@ -7,41 +7,41 @@ matcher = "startup|resume|clear|compact"
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+command = "node /home/wmm/.codex/plugins/coding-agent-task-monitor/plugins/coding-agent-task-monitor/scripts/codex-task-state-hook.mjs"
 timeout = 5
 
 [[hooks.UserPromptSubmit]]
 
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
-command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+command = "node /home/wmm/.codex/plugins/coding-agent-task-monitor/plugins/coding-agent-task-monitor/scripts/codex-task-state-hook.mjs"
 timeout = 5
 
 [[hooks.PermissionRequest]]
 
 [[hooks.PermissionRequest.hooks]]
 type = "command"
-command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+command = "node /home/wmm/.codex/plugins/coding-agent-task-monitor/plugins/coding-agent-task-monitor/scripts/codex-task-state-hook.mjs"
 timeout = 5
 
 [[hooks.PreToolUse]]
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+command = "node /home/wmm/.codex/plugins/coding-agent-task-monitor/plugins/coding-agent-task-monitor/scripts/codex-task-state-hook.mjs"
 timeout = 5
 
 [[hooks.PostToolUse]]
 
 [[hooks.PostToolUse.hooks]]
 type = "command"
-command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-task-state-hook.mjs"
+command = "node /home/wmm/.codex/plugins/coding-agent-task-monitor/plugins/coding-agent-task-monitor/scripts/codex-task-state-hook.mjs"
 timeout = 5
 
 [[hooks.Stop]]
 
 [[hooks.Stop.hooks]]
 type = "command"
-command = "node /home/wmm/plugins/codex-weixin-notifier/scripts/codex-finish-hook.mjs"
+command = "node /home/wmm/.codex/plugins/coding-agent-task-monitor/plugins/coding-agent-task-monitor/scripts/codex-finish-hook.mjs"
 timeout = 45
 statusMessage = "Sending Weixin completion notification"

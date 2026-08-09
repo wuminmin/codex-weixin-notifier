@@ -41,9 +41,9 @@ The plugin separates a shared task/notification core from channel transports:
 Use the unified first-run flow after install or whenever the user wants to reconfigure:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/onboard.mjs
-node /path/to/codex-weixin-notifier/scripts/onboard.mjs --help
-node /path/to/codex-weixin-notifier/scripts/onboard.mjs --channel feishu --platform lark --mode qr
+node /path/to/coding-agent-task-monitor/scripts/onboard.mjs
+node /path/to/coding-agent-task-monitor/scripts/onboard.mjs --help
+node /path/to/coding-agent-task-monitor/scripts/onboard.mjs --channel feishu --platform lark --mode qr
 ```
 
 The supported CLI names are `weixin`, `feishu`, and `lark` as a Feishu platform. Short aliases may parse for compatibility, but user-facing instructions should prefer standard names. Onboard starts or restarts the router and treats receiving a session list after sending `历史` as success. For Feishu/Lark, the first successful chat reply is saved as the default `notifyTargets` entry.
@@ -53,28 +53,28 @@ The supported CLI names are `weixin`, `feishu`, and `lark` as a Feishu platform.
 Configure each Feishu or Lark enterprise self-built application bot separately. Manual mode prompts for the App Secret without placing it in shell history:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
+node /path/to/coding-agent-task-monitor/scripts/setup-feishu.mjs \
   --account company-a --bot codex-main --platform feishu --mode manual
 ```
 
 QR mode uses the official SDK application registration flow and requests bot identity, private-message receive, group `@bot` receive, send-as-bot, media, and `im.message.receive_v1` capabilities. Use `--platform lark` for Lark international:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
+node /path/to/coding-agent-task-monitor/scripts/setup-feishu.mjs \
   --account company-a --bot codex-main --platform lark --mode qr
 ```
 
 After scanning or entering credentials, ensure the app is published, permissions are approved, long-connection events are enabled, and the bot is added to target groups. Then validate with the matching platform:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/setup-feishu.mjs \
+node /path/to/coding-agent-task-monitor/scripts/setup-feishu.mjs \
   --account company-a --bot codex-main --platform lark --check
 ```
 
 The config file is written with mode `0600`. Repeat setup for more accounts or bots, then start every enabled adapter with:
 
 ```bash
-/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh --restart
+/path/to/coding-agent-task-monitor/scripts/start-router-tmux.sh --restart
 ```
 
 Feishu/Lark DMs are accepted directly. Group messages must explicitly mention the current bot; when multiple configured bots are in one group, each reacts only to its own mention. Replies are associated with the inbound message, and topic messages remain in the same topic. Feishu/Lark text stays native Markdown/rich text; only `task snap` and explicit image media are PNGs.
@@ -82,10 +82,10 @@ Feishu/Lark DMs are accepted directly. Group messages must explicitly mention th
 General notification examples:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/notify.mjs --dry-run \
+node /path/to/coding-agent-task-monitor/scripts/notify.mjs --dry-run \
   --task "Smoke test" --summary "Fan-out formatting test"
 
-node /path/to/codex-weixin-notifier/scripts/notify.mjs \
+node /path/to/coding-agent-task-monitor/scripts/notify.mjs \
   --channel feishu --platform lark --account company-a --bot codex-main --target ops \
   --task "Codex finished"
 ```
@@ -95,7 +95,7 @@ node /path/to/codex-weixin-notifier/scripts/notify.mjs \
 Run this in the user's own WSL terminal so they can see and scan the QR code:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/pair-weixin.mjs
+node /path/to/coding-agent-task-monitor/scripts/pair-weixin.mjs
 ```
 
 The script writes `~/.codex/weixin-notifier.json` with token, bot id, user id, and recipient id. It also writes `~/.codex/channels/wechat/account.json` in the same shape used by `codex-wechat-channel`, and the sender can read that compatibility file when the notifier config is absent.
@@ -105,7 +105,7 @@ The script writes `~/.codex/weixin-notifier.json` with token, bot id, user id, a
 After QR pairing, the user must send any message to the paired Weixin bot and run:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/bind-recipient.mjs
+node /path/to/coding-agent-task-monitor/scripts/bind-recipient.mjs
 ```
 
 iLink `sendmessage` needs the recipient plus a `context_token` captured from an inbound Weixin message. Without that context the API can return `ret=-2`.
@@ -145,13 +145,13 @@ Environment variables override missing config values:
 Start the command router after pairing and binding:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs
 ```
 
 Use the fixed tmux startup wrapper for WSL startup or Windows Task Scheduler:
 
 ```bash
-/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
+/path/to/coding-agent-task-monitor/scripts/start-router-tmux.sh
 ```
 
 It is idempotent and only starts `codex-wx-router` when that tmux session is missing. Use `--restart` to stop and relaunch the router; active task sessions are restarted by the router on startup.
@@ -202,48 +202,48 @@ Important behavior:
 Local command-router smoke checks:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "list"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "列表"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task close 999"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "任务 关闭 999"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task reset 1"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "任务 重置 1"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task tmux clean"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs --list
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs --list
 ```
 
 Dry-run a media send without uploading:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --dry-run \
   --send-media /tmp/screenshot.png \
   --message "screenshot test"
@@ -254,7 +254,7 @@ node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
 Run a dry test first:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
+node /path/to/coding-agent-task-monitor/scripts/notify-weixin.mjs \
   --dry-run \
   --session test-cli-1 \
   --source codex-cli \
@@ -265,7 +265,7 @@ node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
 Then run a real send after config is present:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
+node /path/to/coding-agent-task-monitor/scripts/notify-weixin.mjs \
   --session codex-cli-$(date +%s) \
   --source codex-cli \
   --status completed \
@@ -278,7 +278,7 @@ Use the sender as the completion command from any Codex or VS Code wrapper that 
 
 ```bash
 CODEX_SESSION_ID="${CODEX_SESSION_ID:-codex-$$}" \
-node /path/to/codex-weixin-notifier/scripts/notify.mjs \
+node /path/to/coding-agent-task-monitor/scripts/notify.mjs \
   --source "${CODEX_PRODUCT:-codex}" \
   --status "${CODEX_STATUS:-completed}" \
   --task "${CODEX_TASK:-Codex task}"
@@ -288,7 +288,7 @@ If the host provides a JSON hook payload, pipe it to stdin:
 
 ```bash
 printf '%s' "$CODEX_HOOK_PAYLOAD" | \
-node /path/to/codex-weixin-notifier/scripts/notify.mjs
+node /path/to/coding-agent-task-monitor/scripts/notify.mjs
 ```
 
 For Codex Stop hooks, use `scripts/codex-finish-hook.mjs` rather than calling a sender directly. It writes the event to `/tmp/codex-weixin-notifier-hooks/`, starts the general `notify.mjs` fan-out sender in a short-lived background tmux session, and exits immediately so slow rendering or channel APIs do not trip the host hook timeout. Check `/tmp/codex-weixin-notifier-hook.log` for launcher and per-target sender output. Router-launched tasks set both the legacy `CODEX_WEIXIN_ROUTER_TASK=1` and general `CODEX_NOTIFIER_ROUTER_TASK=1` suppressors.

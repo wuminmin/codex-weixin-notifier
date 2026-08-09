@@ -29,11 +29,11 @@ curl -fsSL \
 
 The installer:
 
-- Clones this repository into `~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier`.
+- Clones this repository into `~/.codex/plugins/coding-agent-task-monitor/plugins/coding-agent-task-monitor`.
 - Runs `npm ci --omit=dev`.
-- Generates `~/.codex/plugins/codex-weixin-notifier/marketplace.json`.
+- Generates `~/.codex/plugins/coding-agent-task-monitor/.agents/plugins/marketplace.json`.
 - Registers the local marketplace with `codex plugin marketplace add`.
-- Installs or refreshes the plugin with `codex plugin add codex-weixin-notifier@codex-weixin-notifier`.
+- Installs or refreshes the plugin with `codex plugin add coding-agent-task-monitor@coding-agent-task-monitor`.
 
 Requirements:
 
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/
   | CODEX_WEIXIN_REF=v0.2.0 bash
 
 curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh \
-  | CODEX_WEIXIN_INSTALL_ROOT="$HOME/.local/share/codex-weixin-notifier" bash
+  | CODEX_WEIXIN_INSTALL_ROOT="$HOME/.local/share/coding-agent-task-monitor" bash
 
 curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh \
   | CODEX_WEIXIN_SKIP_CODEX_PLUGIN=1 bash
@@ -215,7 +215,7 @@ The independent tool completion poller watches `claude` and `opencode` session v
 Run this in your WSL terminal so the QR code is visible:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/pair-weixin.mjs
+node /path/to/coding-agent-task-monitor/scripts/pair-weixin.mjs
 ```
 
 Scan the QR code with Weixin and confirm on the phone. The script writes the notification config:
@@ -235,7 +235,7 @@ It also writes a compatibility account file matching `codex-wechat-channel`:
 iLink requires a recent Weixin conversation context for `sendmessage`. After pairing, send any message to the paired Weixin bot, then run:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/bind-recipient.mjs
+node /path/to/coding-agent-task-monitor/scripts/bind-recipient.mjs
 ```
 
 The script captures `toUser` and `contextToken`, then updates:
@@ -262,7 +262,7 @@ npm test
 ```
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
+node /path/to/coding-agent-task-monitor/scripts/notify-weixin.mjs \
   --dry-run \
   --session test-cli-1 \
   --source codex-cli \
@@ -280,7 +280,7 @@ By default, the dry run prints the generated long-image path or paths instead of
 Real send after pairing:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/notify-weixin.mjs \
+node /path/to/coding-agent-task-monitor/scripts/notify-weixin.mjs \
   --session wsl-test \
   --source codex-cli \
   --task "Codex test" \
@@ -301,23 +301,23 @@ node scripts/codex-command-router.mjs \
 Start only the legacy-compatible Weixin command router after pairing and binding:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs
 ```
 
 Or start all configured channels in the fixed tmux router session:
 
 ```bash
-/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
+/path/to/coding-agent-task-monitor/scripts/start-router-tmux.sh
 ```
 
 The start script is idempotent: it starts `codex-wx-router` only when that tmux session is missing. Use `--restart` when you want to stop and relaunch the router; active task sessions are restarted by the router on startup. It is safe to call from PowerShell, WSL login startup, or Windows Task Scheduler:
 
 ```powershell
-wsl.exe -- bash -lc "/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh"
+wsl.exe -- bash -lc "/path/to/coding-agent-task-monitor/scripts/start-router-tmux.sh"
 ```
 
 ```bash
-/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh --restart
+/path/to/coding-agent-task-monitor/scripts/start-router-tmux.sh --restart
 ```
 
 The same script also keeps the independent `codex-wx-tool-notifier` poller running. Use `--skip-tool-notifier` when only the channel router should run. The poller state is stored separately from Codex tasks:
@@ -389,7 +389,7 @@ ls
 列文件
 ls /path/to/project
 列文件 /path/to/project
-add tests for codex-weixin-notifier
+add tests for coding-agent-task-monitor
 update the README too
 ```
 
@@ -550,42 +550,42 @@ task 1 [running]
 Local smoke checks:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "list"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "列表"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task close 999"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "任务 关闭 999"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task reset 1"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "任务 重置 1"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --message "task tmux clean"
 
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs --list
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs --list
 ```
 
 Optional command-router config fields in `~/.codex/weixin-notifier.json`:
@@ -635,7 +635,7 @@ Feishu uses the same task workflow and size/allowed-directory checks. The offici
 Local dry-run for the attachment path:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --once \
   --dry-run \
   --attach-file /tmp/screenshot.png \
@@ -670,7 +670,7 @@ Safety limits:
 Dry-run a local media path without uploading:
 
 ```bash
-node /path/to/codex-weixin-notifier/scripts/weixin-command-router.mjs \
+node /path/to/coding-agent-task-monitor/scripts/weixin-command-router.mjs \
   --dry-run \
   --send-media /tmp/screenshot.png \
   --message "screenshot test"

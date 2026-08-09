@@ -1,5 +1,5 @@
 {
-  "name": "codex-weixin-notifier",
+  "name": "coding-agent-task-monitor",
   "version": "0.2.0",
   "description": "Monitor Claude Code, opencode, and Codex tasks and send Weixin/Feishu notifications from multiple bots.",
   "author": {

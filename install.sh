@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLUGIN_NAME="codex-weixin-notifier"
-MARKETPLACE_NAME="codex-weixin-notifier"
+PLUGIN_NAME="coding-agent-task-monitor"
+MARKETPLACE_NAME="coding-agent-task-monitor"
 DISPLAY_NAME="编码智能体任务监控"
 DEFAULT_REPO_URL="https://github.com/wuminmin/coding-agent-task-monitor.git"
 DEFAULT_REF="main"
