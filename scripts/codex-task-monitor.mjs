@@ -585,7 +585,7 @@ function routerTaskView(task) {
   };
 }
 
-function localSessionViews() {
+export function localSessionViews() {
   const state = readJson(SESSION_STATE_PATH, { sessions: {} });
   const hooked = Object.values(state.sessions || {});
   const merged = new Map();

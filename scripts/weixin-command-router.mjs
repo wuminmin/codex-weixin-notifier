@@ -557,7 +557,8 @@ function createTaskSlot(taskId, fromUser = "", options = {}) {
   const task = {
     id,
     kind: "task",
-    intent: `${config.channel === "feishu" ? "飞书" : "微信"}任务 task ${id}`,
+    runner: options.runner || "codex",
+    intent: `${config.channel === "feishu" ? "飞书" : "微信"}任务 task ${id}${options.runner && options.runner !== "codex" ? ` (${options.runner})` : ""}`,
     cwd,
     dataDir,
     status: "ready",
@@ -2581,10 +2582,136 @@ async function completeTask({ taskId, runId, exitCode, signal = "", config }) {
   return latest;
 }
 
+const EXEC_RUNNER_LABELS = { claude: "Claude Code", opencode: "opencode" };
+
+function execRunnerCommand(runner, task, config, text) {
+  if (runner === "claude") {
+    const cmd = valueFrom(config.claudeCommand, process.env.CODEX_WEIXIN_CLAUDE_COMMAND, "claude");
+    const args = ["-p", text, "--output-format", "json"];
+    if (task.toolSessionId) args.push("--resume", task.toolSessionId);
+    return { cmd, args };
+  }
+  const cmd = valueFrom(config.opencodeCommand, process.env.CODEX_WEIXIN_OPENCODE_COMMAND, "opencode");
+  const args = ["run", text];
+  if (task.toolSessionId) args.push("-s", task.toolSessionId);
+  return { cmd, args };
+}
+
+function parseClaudeJsonOutput(stdout) {
+  const lines = String(stdout || "").split(/\r?\n/u).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const parsed = JSON.parse(lines[index]);
+      if (parsed && parsed.type === "result") {
+        return { output: String(parsed.result || ""), sessionId: String(parsed.session_id || "") };
+      }
+    } catch {
+      // not a json line, continue
+    }
+  }
+  return { output: "", sessionId: "" };
+}
+
+function forwardToExecTask(task, text, config, fromUser = "", attachments = [], options = {}) {
+  const runner = task.runner;
+  const runnerLabel = EXEC_RUNNER_LABELS[runner] || runner;
+  const cwd = task.cwd || process.env.PWD || process.cwd();
+  const replyConfig = options.replyConfig || config;
+  const sendArgs = options.args || {};
+  const { cmd, args } = execRunnerCommand(runner, task, config, text);
+
+  updateTask(task.id, (current) => ({
+    ...current,
+    status: "running",
+    fromUser: fromUser || current.fromUser || "",
+    activeReplyContext: serializableReplyContext(replyConfig),
+    updatedAt: new Date().toISOString(),
+  }));
+
+  sendWatcherText(taskHeader(task.id, `${runnerLabel} 处理中`), replyConfig, sendArgs).catch(() => {});
+
+  let child;
+  try {
+    child = spawn(cmd, args, {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, CODEX_NOTIFIER_ROUTER_TASK: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    updateTask(task.id, (current) => ({ ...current, status: "ready", updatedAt: new Date().toISOString() }));
+    return `${taskHeader(task.id, `${runnerLabel} 启动失败`)}\n命令: ${cmd} ${args.join(" ")}\n错误: ${err.message}`;
+  }
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+
+  const timeoutMs = Number(valueFrom(config.execTimeoutMs, process.env.CODEX_WEIXIN_EXEC_TIMEOUT_MS, 1800000));
+  const timer = setTimeout(() => {
+    try { child.kill("SIGTERM"); } catch { /* best effort */ }
+  }, timeoutMs);
+
+  child.on("error", (err) => {
+    clearTimeout(timer);
+    updateTask(task.id, (current) => ({ ...current, status: "ready", updatedAt: new Date().toISOString() }));
+    sendWatcherText(
+      [
+        taskHeader(task.id, `${runnerLabel} 启动失败`),
+        `命令: ${cmd} ${args.join(" ")}`,
+        `错误: ${err.message}`,
+      ].join("\n"),
+      replyConfig,
+      sendArgs,
+    ).catch(() => {});
+  });
+
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    let output = "";
+    let sessionId = task.toolSessionId || "";
+    if (runner === "claude") {
+      const parsed = parseClaudeJsonOutput(stdout);
+      if (parsed.output) output = parsed.output;
+      if (parsed.sessionId) sessionId = parsed.sessionId;
+    } else {
+      output = String(stdout || "").trim();
+      if (!sessionId) {
+        const sidMatch = String(stderr || stdout || "").match(/\bses_[A-Za-z0-9]+\b/u);
+        if (sidMatch) sessionId = sidMatch[0];
+      }
+    }
+    if (!output) output = String(stderr || "").trim() || "(无输出)";
+
+    updateTask(task.id, (current) => ({
+      ...current,
+      status: "ready",
+      toolSessionId: sessionId || current.toolSessionId || "",
+      lastInteractiveCompletedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+
+    const reply = [
+      taskHeader(task.id, `${runnerLabel} 完成 (exit ${code})`),
+      "",
+      output,
+    ].join("\n");
+    sendWatcherTextWithMedia(reply, replyConfig, sendArgs).catch(() => {});
+  });
+
+  return taskHeader(task.id, `${runnerLabel} 已发送，完成后自动回传`);
+}
+
 function forwardToTask(task, text, config, fromUser = "", attachments = [], options = {}) {
   task = refreshTaskLiveness(task);
   const instruction = String(text || "").trim();
   if (!instruction && attachments.length === 0) return `task ${task.id}: 空消息已忽略`;
+
+  const runner = task.runner || "codex";
+  if (runner === "claude" || runner === "opencode") {
+    return forwardToExecTask(task, instruction, config, fromUser, attachments, options);
+  }
 
   const simpleCommand = attachments.length === 0 ? parsedSimpleCommand(instruction) : null;
   if (simpleCommand) return runSimpleCommand(task, simpleCommand);
@@ -3068,6 +3195,14 @@ function parseCommand(text) {
   }
   const taskMatch = trimmed.match(new RegExp(`^${taskKeyword}\\s+(\\S+)$`, "iu"));
   if (taskMatch) return { type: "enter", target: taskMatch[1] };
+  const claudeEnterMatch = trimmed.match(/^claude\s+(\S+)(?:\s+([\s\S]+))?$/iu);
+  if (claudeEnterMatch) {
+    return { type: "enter", target: claudeEnterMatch[1], runner: "claude", text: claudeEnterMatch[2] || "" };
+  }
+  const opencodeEnterMatch = trimmed.match(/^opencode\s+(\S+)(?:\s+([\s\S]+))?$/iu);
+  if (opencodeEnterMatch) {
+    return { type: "enter", target: opencodeEnterMatch[1], runner: "opencode", text: opencodeEnterMatch[2] || "" };
+  }
   return { type: "message", text: trimmed };
 }
 
@@ -3085,7 +3220,19 @@ async function handleText(text, fromUser, config, options = {}) {
   if (command.type === "unalias") return unsetTaskAlias(command.target, { dryRun: Boolean(config.dryRun) });
   if (command.type === "reset") return resetTaskTargets(command.targets, { dryRun: Boolean(config.dryRun) });
   if (command.type === "close") return closeTaskTargets(command.targets, fromUser, { dryRun: Boolean(config.dryRun) });
-  if (command.type === "enter") return enterTask(command.target, fromUser, { dryRun: Boolean(config.dryRun) });
+  if (command.type === "enter") {
+    const enterMessage = enterTask(command.target, fromUser, {
+      runner: command.runner,
+      dryRun: Boolean(config.dryRun),
+    });
+    if (command.text && typeof enterMessage === "string" && !enterMessage.includes("不存在")) {
+      const task = getCurrentTask(fromUser);
+      if (task) {
+        return forwardToTask(task, command.text, config, fromUser, [], options);
+      }
+    }
+    return enterMessage;
+  }
 
   const task = getCurrentTask(fromUser);
   if (!task) return "task 0: 状态异常，未找到默认任务。";
