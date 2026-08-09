@@ -1,19 +1,19 @@
-# Codex Weixin, Feishu & Lark Notifier
+# 编码智能体任务监控
 
-Local Codex plugin that routes numbered Codex tasks through Weixin, Feishu China, and Lark international, and fans completion notifications out to configured targets. Feishu/Lark supports multiple enterprise accounts and multiple application bots per account; every bot has an isolated task pool, attachment directory, state namespace, and tmux session set.
+面向 Claude Code、opencode 和 Codex 的编码智能体任务监控工具：通过微信、飞书和 Lark 路由任务、监控状态并发送完成通知。Feishu/Lark 支持多个企业账号和多个应用机器人；每个机器人拥有隔离的任务池、附件目录、状态空间和 tmux 会话。
 
 ## Install
 
 Review the installer first if you want to inspect what it does:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh
+curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh
 ```
 
 Install or update with one command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh | bash
 ```
 
 If `raw.githubusercontent.com` is rate-limited or blocked, use the GitHub API raw endpoint instead:
@@ -21,7 +21,7 @@ If `raw.githubusercontent.com` is rate-limited or blocked, use the GitHub API ra
 ```bash
 curl -fsSL \
   -H 'Accept: application/vnd.github.raw' \
-  'https://api.github.com/repos/wuminmin/codex-weixin-notifier/contents/install.sh?ref=main' \
+  'https://api.github.com/repos/wuminmin/coding-agent-task-monitor/contents/install.sh?ref=main' \
   | bash
 ```
 
@@ -44,16 +44,16 @@ Requirements:
 Installer overrides:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh \
   | CODEX_WEIXIN_REF=v0.2.0 bash
 
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh \
   | CODEX_WEIXIN_INSTALL_ROOT="$HOME/.local/share/codex-weixin-notifier" bash
 
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh \
   | CODEX_WEIXIN_SKIP_CODEX_PLUGIN=1 bash
 
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh \
   | CODEX_WEIXIN_SKIP_ONBOARDING=1 bash
 ```
 
@@ -674,7 +674,7 @@ To publish this as a one-line install project:
 6. Test from a clean shell:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh \
   | CODEX_WEIXIN_INSTALL_ROOT=/tmp/codex-weixin-install-test \
     CODEX_WEIXIN_REF=main \
     CODEX_WEIXIN_SKIP_CODEX_PLUGIN=1 \
@@ -684,7 +684,7 @@ curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main
 For a release-pinned install command, publish:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/v0.2.0/install.sh \
+curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/v0.2.0/install.sh \
   | CODEX_WEIXIN_REF=v0.2.0 bash
 ```
 
@@ -693,7 +693,7 @@ If GitHub raw returns `429`, use the API raw endpoint:
 ```bash
 curl -fsSL \
   -H 'Accept: application/vnd.github.raw' \
-  'https://api.github.com/repos/wuminmin/codex-weixin-notifier/contents/install.sh?ref=v0.2.0' \
+  'https://api.github.com/repos/wuminmin/coding-agent-task-monitor/contents/install.sh?ref=v0.2.0' \
   | CODEX_WEIXIN_REF=v0.2.0 bash
 ```
 

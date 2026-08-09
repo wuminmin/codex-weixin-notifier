@@ -1,15 +1,15 @@
 {
   "name": "codex-weixin-notifier",
   "version": "0.2.0",
-  "description": "Send Weixin and Feishu notifications and route isolated numbered Codex tasks from multiple bots.",
+  "description": "Monitor Claude Code, opencode, and Codex tasks and send Weixin/Feishu notifications from multiple bots.",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "Codex Weixin & Feishu Notifier",
-    "shortDescription": "Notify Weixin/Feishu and route isolated Codex tasks.",
-    "longDescription": "Adds Weixin/iLink and multi-account Feishu application-bot workflows for Codex completion notifications, media, and isolated numbered task routing.",
+    "displayName": "编码智能体任务监控",
+    "shortDescription": "监控编码智能体任务，并通过微信/飞书发送通知。",
+    "longDescription": "提供微信/iLink、飞书和 Lark 的编码智能体任务监控、完成通知、媒体消息和隔离任务路由。",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [
@@ -20,9 +20,9 @@
     ],
     "defaultPrompt": [
       "Help me configure Weixin completion notifications.",
-      "Configure a Feishu application bot for Codex tasks.",
-      "Send a test Codex completion notification.",
-      "Start the notifier channel router."
+      "Configure a Feishu application bot for coding-agent tasks.",
+      "Send a test coding-agent completion notification.",
+      "Start the task-monitor channel router."
     ],
     "brandColor": "#18A058"
   }

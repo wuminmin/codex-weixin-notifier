@@ -3,8 +3,8 @@ set -euo pipefail
 
 PLUGIN_NAME="codex-weixin-notifier"
 MARKETPLACE_NAME="codex-weixin-notifier"
-DISPLAY_NAME="Codex Weixin & Feishu Notifier"
-DEFAULT_REPO_URL="https://github.com/wuminmin/codex-weixin-notifier.git"
+DISPLAY_NAME="编码智能体任务监控"
+DEFAULT_REPO_URL="https://github.com/wuminmin/coding-agent-task-monitor.git"
 DEFAULT_REF="main"
 
 REPO_URL="${CODEX_WEIXIN_REPO:-$DEFAULT_REPO_URL}"
@@ -45,7 +45,7 @@ Environment overrides:
   CODEX_WEIXIN_SKIP_ONBOARDING   Set to 1 to skip the interactive onboard flow.
 
 Example:
-  curl -fsSL https://raw.githubusercontent.com/wuminmin/codex-weixin-notifier/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh | bash
 EOF
 }
 

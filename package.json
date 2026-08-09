@@ -1,7 +1,7 @@
 {
   "name": "codex-weixin-notifier",
   "version": "0.2.0",
-  "description": "Send Weixin and Feishu notifications and route isolated Codex tasks from multiple bots.",
+  "description": "Monitor Claude Code, opencode, and Codex tasks and send Weixin/Feishu notifications from multiple bots.",
   "license": "MIT",
   "engines": {
     "node": ">=20"
