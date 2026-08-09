@@ -14,6 +14,9 @@ PLUGIN_DIR="$INSTALL_ROOT/plugins/$PLUGIN_NAME"
 MARKETPLACE_FILE="$INSTALL_ROOT/marketplace.json"
 SKIP_CODEX_PLUGIN="${CODEX_WEIXIN_SKIP_CODEX_PLUGIN:-0}"
 SKIP_NPM="${CODEX_WEIXIN_SKIP_NPM:-0}"
+COMMAND_DIR="${CODEX_WEIXIN_COMMAND_DIR:-$HOME/.local/bin}"
+COMMAND_NAME="catm"
+COMMAND_PATH="$COMMAND_DIR/$COMMAND_NAME"
 
 say() {
   printf '%s\n' "$*"
@@ -43,6 +46,7 @@ Environment overrides:
   CODEX_WEIXIN_SKIP_CODEX_PLUGIN Set to 1 to skip Codex plugin registration.
   CODEX_WEIXIN_SKIP_NPM          Set to 1 to skip npm dependency install.
   CODEX_WEIXIN_SKIP_ONBOARDING   Set to 1 to skip the interactive onboard flow.
+  CODEX_WEIXIN_COMMAND_DIR       Directory for the '$COMMAND_NAME' launcher. Default: ~/.local/bin.
 
 Example:
   curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/main/install.sh | bash
@@ -88,6 +92,17 @@ if [ "$SKIP_NPM" != "1" ]; then
 fi
 
 chmod +x "$PLUGIN_DIR"/scripts/*.mjs "$PLUGIN_DIR"/scripts/*.sh
+
+if [ -e "$COMMAND_PATH" ] || [ -L "$COMMAND_PATH" ]; then
+  if [ -L "$COMMAND_PATH" ] && [ "$(readlink -f "$COMMAND_PATH" 2>/dev/null || true)" = "$PLUGIN_DIR/scripts/onboard.mjs" ]; then
+    ln -sfn "$PLUGIN_DIR/scripts/onboard.mjs" "$COMMAND_PATH"
+  else
+    say "warning: $COMMAND_PATH already exists; keeping it unchanged."
+  fi
+else
+  mkdir -p "$COMMAND_DIR"
+  ln -s "$PLUGIN_DIR/scripts/onboard.mjs" "$COMMAND_PATH"
+fi
 
 cat >"$MARKETPLACE_FILE" <<EOF
 {
@@ -141,8 +156,8 @@ Plugin directory:
   $PLUGIN_DIR
 
 Onboard:
-  node "$PLUGIN_DIR/scripts/onboard.mjs"
-  node "$PLUGIN_DIR/scripts/onboard.mjs" --help
+  $COMMAND_NAME
+  $COMMAND_NAME --help
 
 Quick commands after onboard:
   list
@@ -156,10 +171,13 @@ if [ "${CODEX_WEIXIN_SKIP_ONBOARDING:-0}" != "1" ] && [ -t 0 ] && [ -t 1 ]; then
   say "Starting interactive onboard. Set CODEX_WEIXIN_SKIP_ONBOARDING=1 to skip this step."
   if ! node "$PLUGIN_DIR/scripts/onboard.mjs"; then
     say "warning: onboard did not complete."
-    say "         Re-run: node \"$PLUGIN_DIR/scripts/onboard.mjs\""
+    say "         Re-run: $COMMAND_NAME"
   fi
 else
   say ""
   say "Interactive onboard was not started. Run:"
-  say "  node \"$PLUGIN_DIR/scripts/onboard.mjs\""
+  say "  $COMMAND_NAME"
+  if [[ ":$PATH:" != *":$COMMAND_DIR:"* ]]; then
+    say "  If '$COMMAND_NAME' is not found: export PATH=\"$COMMAND_DIR:\$PATH\""
+  fi
 fi

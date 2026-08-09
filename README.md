@@ -60,16 +60,16 @@ curl -fsSL https://raw.githubusercontent.com/wuminmin/coding-agent-task-monitor/
 After installation, an interactive terminal automatically starts onboard. You can run it again at any time:
 
 ```bash
-node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/onboard.mjs
-node ~/.codex/plugins/codex-weixin-notifier/plugins/codex-weixin-notifier/scripts/onboard.mjs --help
+catm
+catm --help
 ```
 
 Direct examples:
 
 ```bash
-node scripts/onboard.mjs --channel weixin --mode qr
-node scripts/onboard.mjs --channel feishu --platform feishu --mode qr --account company-a --bot codex-main
-node scripts/onboard.mjs --channel feishu --platform lark --mode qr --account global-a --bot codex-main
+catm --channel weixin --mode qr
+catm --channel feishu --platform feishu --mode qr --account company-a --bot codex-main
+catm --channel feishu --platform lark --mode qr --account global-a --bot codex-main
 ```
 
 First-run journey:

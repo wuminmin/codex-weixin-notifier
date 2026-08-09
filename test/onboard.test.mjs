@@ -31,6 +31,8 @@ function options(overrides = {}) {
 
 test("help uses standard channel and platform names", () => {
   const help = onboardForTests.usage();
+  assert.match(help, /^  catm$/mu);
+  assert.doesNotMatch(help, /node scripts\/onboard\.mjs/u);
   assert.match(help, /--channel weixin\|feishu/u);
   assert.match(help, /--platform feishu\|lark/u);
   assert.doesNotMatch(help, /\bfeis\b/u);

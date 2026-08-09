@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import os from "node:os";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
@@ -21,11 +22,11 @@ const PLUGIN_DIR = path.dirname(SCRIPT_DIR);
 function usage() {
   return [
     "Usage:",
-    "  node scripts/onboard.mjs",
-    "  node scripts/onboard.mjs --channel weixin --mode qr",
-    "  node scripts/onboard.mjs --channel weixin --mode manual",
-    "  node scripts/onboard.mjs --channel feishu --platform feishu --mode qr --account company-a --bot codex-main",
-    "  node scripts/onboard.mjs --channel feishu --platform lark --mode manual --account company-a --bot codex-main",
+    "  catm",
+    "  catm --channel weixin --mode qr",
+    "  catm --channel weixin --mode manual",
+    "  catm --channel feishu --platform feishu --mode qr --account company-a --bot codex-main",
+    "  catm --channel feishu --platform lark --mode manual --account company-a --bot codex-main",
     "",
     "Options:",
     "  --channel weixin|feishu   Channel to configure.",
@@ -309,7 +310,16 @@ export async function runOnboard(argv = process.argv.slice(2), options = {}) {
   return onboardFeishu(args, options);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(SCRIPT_PATH)) {
+function invokedAsMainScript() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(path.resolve(process.argv[1])) === realpathSync(SCRIPT_PATH);
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMainScript()) {
   runOnboard().catch((error) => {
     process.stderr.write(`${error.stack || error.message}\n`);
     process.exit(1);
