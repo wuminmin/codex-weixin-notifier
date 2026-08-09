@@ -11,7 +11,8 @@ REPO_URL="${CODEX_WEIXIN_REPO:-$DEFAULT_REPO_URL}"
 REPO_REF="${CODEX_WEIXIN_REF:-$DEFAULT_REF}"
 INSTALL_ROOT="${CODEX_WEIXIN_INSTALL_ROOT:-$HOME/.codex/plugins/$PLUGIN_NAME}"
 PLUGIN_DIR="$INSTALL_ROOT/plugins/$PLUGIN_NAME"
-MARKETPLACE_FILE="$INSTALL_ROOT/marketplace.json"
+MARKETPLACE_DIR="$INSTALL_ROOT/.agents/plugins"
+MARKETPLACE_FILE="$MARKETPLACE_DIR/marketplace.json"
 SKIP_CODEX_PLUGIN="${CODEX_WEIXIN_SKIP_CODEX_PLUGIN:-0}"
 SKIP_NPM="${CODEX_WEIXIN_SKIP_NPM:-0}"
 COMMAND_DIR="${CODEX_WEIXIN_COMMAND_DIR:-$HOME/.local/bin}"
@@ -73,7 +74,7 @@ if ! command -v tmux >/dev/null 2>&1; then
   say "warning: tmux was not found; command routing requires tmux."
 fi
 
-mkdir -p "$INSTALL_ROOT/plugins"
+mkdir -p "$INSTALL_ROOT/plugins" "$MARKETPLACE_DIR"
 
 if [ -d "$PLUGIN_DIR/.git" ]; then
   say "Updating $PLUGIN_NAME in $PLUGIN_DIR"
@@ -91,7 +92,14 @@ if [ "$SKIP_NPM" != "1" ]; then
   npm --prefix "$PLUGIN_DIR" ci --omit=dev
 fi
 
-chmod +x "$PLUGIN_DIR"/scripts/*.mjs "$PLUGIN_DIR"/scripts/*.sh
+# Preserve the executable bit declared by Git.  Making every JavaScript file
+# executable dirties tracked 0644 files and makes the next update fail before
+# checkout (for example command-registry.mjs and tool-router modules).
+while IFS=$'\t' read -r mode tracked_path; do
+  if [ "$mode" = "100755" ]; then
+    chmod +x "$PLUGIN_DIR/$tracked_path"
+  fi
+done < <(git -C "$PLUGIN_DIR" ls-files -s | awk '{ print $1 "\t" $4 }')
 
 if [ -e "$COMMAND_PATH" ] || [ -L "$COMMAND_PATH" ]; then
   if [ -L "$COMMAND_PATH" ] && [ "$(readlink -f "$COMMAND_PATH" 2>/dev/null || true)" = "$PLUGIN_DIR/scripts/onboard.mjs" ]; then
