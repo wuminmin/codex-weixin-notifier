@@ -36,7 +36,7 @@ function usage() {
     "  --bot NAME                Feishu/Lark bot namespace. Default: codex-main.",
     "  --config PATH             Notifier config path. Default: ~/.codex/codex-notifier.json.",
     "",
-    "Success means the router is running and you have received task 0 after sending list in the chat app.",
+    "Success means the router is running and you have received a session list after sending 历史 in the chat app.",
   ].join("\n");
 }
 
@@ -275,7 +275,7 @@ async function finishWithRouter(channel, platform, options = {}) {
   } else {
     process.stdout.write("In Weixin, send: list\n");
   }
-  process.stdout.write("Press Enter after you receive task 0 [default,current].\n");
+  process.stdout.write("Press Enter after you receive the session list after sending 历史.\n");
   await question("", options);
   process.stdout.write(`Authentication successful for ${label}.\n`);
 }

@@ -39,7 +39,7 @@ test("tool commands parse into isolated runner sessions", () => {
   assert.deepEqual(toolRouterForTests.parseToolCommand("工具退出"), { type: "off" });
 });
 
-test("agent selection is lazy and doctor works without installed agents", async () => {
+test("agent doctor remains available while phone sessions replace tool slots", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-tool-control-"));
   const config = {
     ...runtime(home),
@@ -48,38 +48,29 @@ test("agent selection is lazy and doctor works without installed agents", async 
     claudeCommand: "missing-claude",
     opencodeCommand: "missing-opencode",
   };
-  const selected = await withRuntimeConfig(config, () => taskCoreForTests.handleText("tool use claude", "chat-a", config));
-  assert.match(selected, /Current agent: Claude Code/u);
-  assert.match(selected, /not installed/u);
-  const toolState = JSON.parse(fs.readFileSync(path.join(home, "state", "tool-tasks.json"), "utf8"));
-  assert.equal(toolState.tasks["claude:1"].status, "ready");
-  assert.equal(toolState.tasks["claude:1"].tmuxSession, "");
   const doctor = await withRuntimeConfig(config, () => taskCoreForTests.handleText("tool doctor", "chat-a", config));
   assert.match(doctor, /Codex: missing/u);
   assert.match(doctor, /Claude Code: missing/u);
   assert.match(doctor, /Router: ready/u);
-  const blocked = await withRuntimeConfig({ ...config, dryRun: false }, () => taskCoreForTests.handleText("run it", "chat-a", { ...config, dryRun: false }));
-  assert.match(blocked, /任务未执行/u);
-  assert.match(blocked, /not installed/u);
+  const selected = await withRuntimeConfig(config, () => taskCoreForTests.handleText("新会话 claude", "chat-a", config));
+  assert.match(selected, /Claude Code 会话 · 将启动/u);
 });
 
-test("Claude and opencode tool tasks do not create or reuse Codex tasks", async () => {
+test("new Claude and opencode sessions do not create numbered Codex tasks", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-tool-router-"));
   const config = runtime(home);
   await withRuntimeConfig(config, async () => {
-    const claude = await taskCoreForTests.handleText("claude 1 review", "chat-a", config);
-    const opencode = await taskCoreForTests.handleText("opencode 1 inspect", "chat-a", config);
+    const claude = await taskCoreForTests.handleText("新会话 claude", "chat-a", config);
+    const opencode = await taskCoreForTests.handleText("新会话 opencode", "chat-a", config);
     const followup = await taskCoreForTests.handleText("继续", "chat-a", config);
 
-    assert.match(claude, /tool claude 1 · 将发送/u);
-    assert.match(opencode, /tool opencode 1 · 将发送/u);
-    assert.match(followup, /tool opencode 1 · 将发送/u);
+    assert.match(claude, /Claude Code 会话 · 将启动/u);
+    assert.match(opencode, /opencode 会话 · 将启动/u);
+    assert.match(followup, /opencode 会话 · 将发送/u);
   });
 
-  const toolState = JSON.parse(fs.readFileSync(path.join(home, "state", "tool-tasks.json"), "utf8"));
-  assert.deepEqual(Object.keys(toolState.tasks).sort(), ["claude:1", "opencode:1"]);
   assert.equal(fs.existsSync(path.join(home, "state", "tasks.json")), false);
 
-  const backToCodex = await withRuntimeConfig(config, () => taskCoreForTests.handleText("task 0", "chat-a", config));
-  assert.match(backToCodex, /task 0/u);
+  const backToLegacy = await withRuntimeConfig(config, () => taskCoreForTests.handleText("task 0", "chat-a", config));
+  assert.match(backToLegacy, /编号 task 模式已停用/u);
 });

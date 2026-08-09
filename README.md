@@ -81,18 +81,19 @@ First-run journey:
 3. Choose QR scan or manual input. Secrets are hidden during manual input.
 4. Complete any Feishu/Lark developer-console publish, permission approval, long-connection, and bot-add steps.
 5. Onboard starts the shared router. Send `list` in Weixin/Feishu/Lark, or `@bot list` in a Feishu/Lark group.
-6. When you receive `task 0 [default,current]`, onboard records success. Feishu/Lark also remembers that chat as the default completion-notification target.
-7. Choose an execution agent with `tool use codex`, `tool use claude`, or `tool use opencode` before sending a task.
+6. When you receive a session list after sending `历史`, onboard records success. Feishu/Lark also remembers that chat as the default completion-notification target.
+7. Send `新会话` to start Codex, or `新会话 claude` / `新会话 opencode` to start another tool.
 
 ## Architecture
 
 - `scripts/pair-weixin.mjs` starts the Tencent iLink QR login flow, shows a terminal QR code, polls for confirmation, and saves credentials to `~/.codex/weixin-notifier.json`.
 - `scripts/onboard.mjs` is the first-run setup entry for Weixin, Feishu China, and Lark international.
 - `scripts/codex-command-router.mjs` starts every enabled channel in one process. It long-polls the legacy Weixin adapter and establishes one official Feishu/Lark Channel WebSocket connection per enabled application bot.
-- `scripts/weixin-command-router.mjs` contains the compatibility Weixin entry and the shared numbered-task core. Routing context is `{channel, account, bot, conversation}`; task pools are shared only inside one bot, while each conversation stores its own current task.
+- `scripts/weixin-command-router.mjs` contains the compatibility Weixin entry and shared phone-session routing. Routing context is `{channel, account, bot, conversation}`; each conversation stores its own current historical or newly-created session.
+- `scripts/session-router.mjs` lists local Codex, VS Code Codex, Claude Code, and opencode sessions, starts non-numbered tmux bridges, resumes historical sessions, and routes phone messages to the current bridge.
 - `scripts/notify.mjs` is the general completion sender. It performs best-effort fan-out to the configured Weixin bot and every enabled entry in Feishu `notifyTargets`; `scripts/notify-weixin.mjs` remains a Weixin-only compatibility entry.
 - `scripts/setup-feishu.mjs` supports hidden interactive App ID/Secret entry, official SDK QR application registration, credential checks, Feishu/Lark platform selection, and mode-`0600` config writes.
-- `scripts/codex-task-state-hook.mjs` records Codex lifecycle events from WSL CLI and VS Code into a small local session registry. `scripts/codex-task-monitor.mjs` merges that registry with Weixin-managed tmux tasks and renders the fixed `任务` (tasks), `进度` (progress), and `状态` (status) views without invoking a model.
+- `scripts/codex-task-state-hook.mjs` records Codex lifecycle events from WSL CLI and VS Code into a small local session registry. `scripts/codex-task-monitor.mjs` discovers local sessions and renders the fixed `任务` (sessions), `进度` (progress), and `状态` (status) views without invoking a model.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
 - The Feishu/Lark transport uses the official [`@larksuiteoapi/node-sdk` Channel](https://github.com/larksuite/node-sdk/blob/main/docs/channel.md), including WebSocket reconnect, message normalization, deduplication, per-chat ordering, native Markdown chunking, media APIs, and group `@bot` policy.
@@ -187,7 +188,7 @@ node scripts/codex-command-router.mjs
 scripts/start-router-tmux.sh --restart
 ```
 
-Each Feishu/Lark bot has its own task 0, numbered tasks, attachment inboxes, state, and tmux sessions. Conversations using the same bot share that bot's task pool, but `currentTask` is tracked by chat `chatId`; identical `open_id`, `chatId`, and task numbers under another bot remain isolated. Replies reference the original message, and topic messages stay in the original topic.
+Each Feishu/Lark bot has its own phone-session catalog, attachment inboxes, state, and tmux bridges. Conversations using the same bot keep their current session binding by chat `chatId`; identical `open_id` or `chatId` under another bot remains isolated. Replies reference the original message, and topic messages stay in the original topic.
 
 ## Completion Notifications
 
@@ -335,6 +336,9 @@ The router stores state in:
 ~/.codex/weixin-notifier/tasks.json
 ~/.codex/weixin-notifier/current-task.json
 ~/.codex/weixin-notifier/codex-sessions.json
+~/.codex/weixin-notifier/session-bridges.json
+~/.codex/weixin-notifier/session-current.json
+~/.codex/weixin-notifier/session-picker.json
 ~/.codex/weixin-notifier/logs/
 ```
 
@@ -388,6 +392,20 @@ ls /path/to/project
 add tests for codex-weixin-notifier
 update the README too
 ```
+
+The current phone-session workflow is:
+
+```text
+历史 / 会话                 list local Codex, VS Code, Claude, and opencode sessions
+接管 N                      resume the Nth session from the latest history list
+当前会话                    show the mobile binding
+退出接管                    clear the mobile binding without deleting history
+新会话                      start a new Codex session
+新会话 claude               start a new Claude Code session
+新会话 opencode             start a new opencode session
+```
+
+The old numbered task and tool-slot commands below are retained only as legacy documentation for old installations. New routers do not create or restart numbered task tmux sessions; use the phone-session commands above.
 
 The command vocabulary is intentionally small:
 

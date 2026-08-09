@@ -50,6 +50,14 @@ import {
   setSelectedRunner,
   toolDoctor as toolDoctorStatus,
 } from "./tool-command-router.mjs";
+import {
+  forwardToCurrentSession,
+  formatSessionHistory,
+  handleSessionCommand,
+  hasCurrentSession,
+  parseSessionCommand,
+  resumeSessionWatchers,
+} from "./session-router.mjs";
 
 const STATE_DIR = "~/.codex/weixin-notifier";
 const TASK_WORKSPACE_ROOT = "~/codex";
@@ -1340,6 +1348,7 @@ function toolRouterDeps(config) {
     sendTextWithMedia,
     serializableReplyContext,
     configWithReplyContext,
+    saveSessionAttachments: (bridge, attachments, sessionConfig) => saveInboundMediaForTask(bridge, attachments, sessionConfig),
     log: (error) => appendRouterError(config, `tool router send failed: ${error?.stack || error?.message || error}`),
   };
 }
@@ -3167,9 +3176,11 @@ function formatHelp(topic = "", fromUser = "") {
     ...contextLines,
     "",
     "Quick start:",
-    "  tool use codex",
-    "  tool use claude",
-    "  tool use opencode",
+    "  历史 / 会话",
+    "  接管 N",
+    "  新会话",
+    "  新会话 claude",
+    "  新会话 opencode",
     "",
     "Help topics:",
     "  help start / 帮助 入门",
@@ -3181,9 +3192,9 @@ function formatHelp(topic = "", fromUser = "") {
     "  help all / 帮助 全部",
     "",
     "Common controls:",
-    "  list / 列表    status / 状态    progress / 进度",
-    "  tool list / 工具列表    tool doctor / 工具诊断",
-    "  tool off / 工具退出",
+    "  历史 / 会话    接管 N    当前会话",
+    "  新会话 [codex|claude|opencode]    退出接管",
+    "  status / 状态    progress / 进度    tool doctor / 工具诊断",
   ].join("\n");
 }
 
@@ -3207,6 +3218,8 @@ function formatOnboardStatus() {
 
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
+  const sessionCommand = parseSessionCommand(trimmed);
+  if (sessionCommand) return { type: "session", command: sessionCommand };
   const taskKeyword = "(?:task|任务)";
   const helpMatch = trimmed.match(/^(?:help|帮助)(?:\s+(.+))?$/iu);
   if (helpMatch || trimmed === "?") return { type: "help", topic: normalizeHelpTopic(helpMatch?.[1] || "") };
@@ -3242,6 +3255,22 @@ function parseCommand(text) {
   return { type: "message", text: trimmed };
 }
 
+function legacyTaskGuide() {
+  return [
+    "编号 task 模式已停用。",
+    "发送 历史 查看电脑上的历史会话，或发送 新会话 开始手机会话。",
+    "旧 task 数据和 tmux 会话不会自动删除。",
+  ].join("\n");
+}
+
+function sessionSelectionGuide() {
+  return [
+    "当前没有手机会话。",
+    "发送 历史 查看电脑上的历史会话，使用 接管 N 继续。",
+    "或发送 新会话 / 新会话 claude / 新会话 opencode 开始新的会话。",
+  ].join("\n");
+}
+
 function agentSelectionGuide(config, fromUser) {
   const pending = pendingCount(config, fromUser);
   return [
@@ -3261,81 +3290,44 @@ async function handleText(text, fromUser, config, options = {}) {
   const command = parseCommand(text);
   if (command.type === "help") return formatHelp(command.topic, fromUser);
   if (command.type === "onboard") return formatOnboardStatus();
-  if (command.type === "monitor-tasks") return config.channel === "weixin" ? formatTaskOverview(fromUser) : formatList(fromUser);
+  if (command.type === "monitor-tasks") return formatSessionHistory(config, fromUser);
   if (command.type === "monitor-progress") return config.channel === "weixin" ? formatTaskProgress(fromUser) : formatChannelProgress(fromUser);
   if (command.type === "monitor-status") return config.channel === "weixin" ? formatSystemStatus() : formatChannelStatus();
-  if (command.type === "list") return formatList(fromUser);
-  if (command.type === "tmux-clean") return cleanupLegacyTaskTmuxSessions({ dryRun: Boolean(config.dryRun) });
-  if (command.type === "snapshot") return taskSnapshotResponse(getCurrentTask(fromUser), config);
-  if (command.type === "alias") return setTaskAlias(command.target, command.alias, { dryRun: Boolean(config.dryRun) });
-  if (command.type === "unalias") return unsetTaskAlias(command.target, { dryRun: Boolean(config.dryRun) });
-  if (command.type === "reset") return resetTaskTargets(command.targets, { dryRun: Boolean(config.dryRun) });
-  if (command.type === "close") return closeTaskTargets(command.targets, fromUser, { dryRun: Boolean(config.dryRun) });
+  if (command.type === "list") return formatSessionHistory(config, fromUser);
+  if (["enter", "tmux-clean", "snapshot", "alias", "unalias", "reset", "close"].includes(command.type)) return legacyTaskGuide();
+  if (command.type === "session") return handleSessionCommand(command.command, fromUser, config, options, toolRouterDeps(config));
+  if (command.type === "tool") {
+    if (command.command?.type === "doctor") return handleToolCommand(command.command, fromUser, config, options, toolRouterDeps(config));
+    if (command.command?.type === "off") return handleSessionCommand({ type: "off" }, fromUser, config, options, toolRouterDeps(config));
+    if (command.command?.type === "list") return formatSessionHistory(config, fromUser);
+    if (command.command?.type === "select") {
+      return "工具编号模式已停用。发送 历史 查看电脑会话，或发送 新会话 claude / 新会话 opencode。";
+    }
+    return handleToolCommand(command.command, fromUser, config, options, toolRouterDeps(config));
+  }
   if (command.type === "message") {
     const localCommand = parsedSimpleCommand(command.text);
     if (localCommand) return runSimpleCommand(getCurrentTask(fromUser), localCommand);
   }
-  if (command.type === "tool") {
-    const response = await handleToolCommand(command.command, fromUser, config, options, toolRouterDeps(config));
-    if (command.command?.type === "select" && command.command.deferred) {
-      const pending = takePending(config, fromUser);
-      if (pending.length > 0) {
-        const replayed = [];
-        for (const item of pending) {
-          replayed.push(await handleTextWithAttachments(item.text, fromUser, config, item.attachments || [], options));
-        }
-        return [response, "", "Replayed pending request(s):", ...replayed].join("\n");
-      }
-    }
-    return response;
+  if (hasCurrentSession(config, fromUser)) {
+    return forwardToCurrentSession(command.text, fromUser, config, options, [], toolRouterDeps(config));
   }
-  if (command.type === "enter") {
-    if (!command.runner) setSelectedRunner(config, fromUser, "codex");
-    const enterMessage = enterTask(command.target, fromUser, {
-      runner: command.runner,
-      dryRun: Boolean(config.dryRun),
-    });
-    if (command.text && typeof enterMessage === "string" && !enterMessage.includes("不存在")) {
-      const task = getCurrentTask(fromUser);
-      if (task) {
-        return forwardToTask(task, command.text, config, fromUser, [], options);
-      }
-    }
-    return enterMessage;
-  }
-
-  if (hasSelectedTool(config, fromUser)) {
-    return forwardToSelectedTool(command.text, fromUser, config, options, [], toolRouterDeps(config));
-  }
-  const runner = selectedToolRunner(config, fromUser);
-  if (!runner) {
-    queuePending(config, fromUser, { text: command.text, attachments: [] });
-    return agentSelectionGuide(config, fromUser);
-  }
-  if (runner !== "codex") return agentSelectionGuide(config, fromUser);
-  const task = getCurrentTask(fromUser);
-  if (!task) return "task 0: 状态异常，未找到默认任务。";
-  return forwardToTask(task, command.text, config, fromUser, [], options);
+  return sessionSelectionGuide();
 }
 
 async function handleTextWithAttachments(text, fromUser, config, attachments = [], options = {}) {
   if (attachments.length === 0) return handleText(text, fromUser, config, options);
-  if (hasSelectedTool(config, fromUser)) {
-    return forwardToSelectedTool(text, fromUser, config, options, attachments, toolRouterDeps(config));
+  if (hasCurrentSession(config, fromUser)) {
+    return forwardToCurrentSession(text, fromUser, config, options, attachments, toolRouterDeps(config));
   }
-  const runner = selectedToolRunner(config, fromUser);
-  if (!runner) {
-    queuePending(config, fromUser, { text, attachments });
-    return agentSelectionGuide(config, fromUser);
-  }
-  if (runner !== "codex") return agentSelectionGuide(config, fromUser);
-  const task = getCurrentTask(fromUser);
-  if (!task) return "task 0: 状态异常，未找到默认任务。";
-  const savedAttachments = await saveInboundMediaForTask(task, attachments, config);
-  return forwardToTask(task, text, config, fromUser, savedAttachments, options);
+  return sessionSelectionGuide();
 }
 
 function inboundHeartbeatText(text, fromUser, attachments = []) {
+  if (hasCurrentSession(currentRuntimeConfig(), fromUser)) {
+    const command = parseCommand(text);
+    return attachments.length > 0 || command.type === "message" ? "手机会话 · 处理中" : "";
+  }
   if (hasSelectedTool(currentRuntimeConfig(), fromUser)) {
     const command = parseCommand(text);
     if (attachments.length > 0 || command.type === "message") return "tool · 处理中";
@@ -3386,7 +3378,7 @@ async function runOnce(args, config) {
 
 async function runPoll(args, config) {
   let sync = loadCommandSync();
-  process.stdout.write("Listening for Weixin Codex tasks. Send 'list' / '列表' or 'task 0' / '任务 0'.\n");
+  process.stdout.write("Listening for phone sessions. Send '历史' / '会话' or '新会话'.\n");
 
   while (true) {
     const updates = await getUpdates(config, sync);
@@ -3424,22 +3416,13 @@ async function runPoll(args, config) {
 function initializeRuntime(args, config) {
   config.dryRun = isDryRun(args, config);
   fallbackRuntimeConfig = config;
-  saveTasks(loadTasks());
-  const restarted = restartActiveTaskSessionsOnRouterStart(config, args);
-  if (restarted.length > 0) {
-    process.stdout.write(`[${config.namespace}] Restarted task sessions: ${restarted.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
-  }
-  const recovered = recoverStaleTaskQueues(config);
-  if (recovered.length > 0) {
-    process.stdout.write(`[${config.namespace}] Recovered stale queued tasks: ${recovered.join(", ")}\n`);
-  }
-  const resumedWatchers = resumePersistedInteractiveWatchers(config, args);
-  if (resumedWatchers.length > 0) {
-    process.stdout.write(`[${config.namespace}] Resumed interactive watchers: ${resumedWatchers.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
-  }
   const resumedToolWatchers = resumeToolWatchers(config, args, toolRouterDeps(config));
   if (resumedToolWatchers.length > 0) {
     process.stdout.write(`[${config.namespace}] Resumed tool watchers: ${resumedToolWatchers.map((task) => `${task.runner}${task.id}:${task.sessionName}`).join(", ")}\n`);
+  }
+  const resumedSessionWatchers = resumeSessionWatchers(config, args, toolRouterDeps(config));
+  if (resumedSessionWatchers.length > 0) {
+    process.stdout.write(`[${config.namespace}] Resumed phone session watchers: ${resumedSessionWatchers.map((item) => `${item.runner}:${item.bridgeId}:${item.sessionName}`).join(", ")}\n`);
   }
 }
 
@@ -3593,7 +3576,6 @@ async function runSingleMode(args, config) {
       return true;
     }
 
-    saveTasks(loadTasks());
     if (args["complete-task"] === "true") {
       await completeTask({
         taskId: valueFrom(args["task-id"], args.task),
@@ -3605,7 +3587,7 @@ async function runSingleMode(args, config) {
       return true;
     }
     if (args.list === "true") {
-      process.stdout.write(`${await formatList()}\n`);
+      process.stdout.write(`${formatSessionHistory(config, "local")}\n`);
       return true;
     }
     if (args.once === "true") {

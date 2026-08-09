@@ -16,14 +16,14 @@ The plugin separates a shared task/notification core from channel transports:
 - `scripts/notify.mjs` fans completion events out to the configured Weixin destination and all enabled Feishu `notifyTargets`; a per-target failure does not stop the remaining sends, but makes the final exit status nonzero.
 - `~/.codex/codex-notifier.json` is the general config. Explicit `--config` / `CODEX_NOTIFIER_CONFIG` wins, followed by the general config, then the legacy Weixin config.
 - Legacy `~/.codex/weixin-notifier.json` is mapped in place to `weixin/default/default`; no key or state migration is required.
-- Each Feishu/Lark `{platform, account, bot}` owns an independent task list, task 0, attachment tree, state namespace, and stable-hash tmux prefix. Conversations inside that bot share its task pool, while the selected current task is stored by `chatId`.
+- Each Feishu/Lark `{platform, account, bot}` owns an independent phone-session catalog, attachment tree, and state namespace. Conversations inside that bot keep their own current phone-session binding by `chatId`.
 - Feishu/Lark uses the official `@larksuiteoapi/node-sdk` Channel for WebSocket reconnect, group `@bot` policy, message normalization, deduplication, per-chat ordering, native Markdown splitting, reply/thread context, and media transfer.
 
 - `scripts/pair-weixin.mjs` starts Tencent iLink QR login directly and saves credentials for Codex.
 - `scripts/notify-weixin.mjs` is the Weixin-only compatibility sender. It renders completion notifications as terminal-style long PNG images by default; set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies.
-- `scripts/weixin-command-router.mjs` listens for inbound Weixin text, maintains numbered Codex tasks, switches the current task with `task N` / `任务 N`, and forwards ordinary text to the selected task's interactive tmux Codex session.
+- `scripts/weixin-command-router.mjs` listens for inbound Weixin text and routes phone commands to `scripts/session-router.mjs`, which lists historical sessions, starts new sessions, and forwards ordinary text to the selected non-numbered tmux bridge.
 - `scripts/codex-task-state-hook.mjs` and `scripts/codex-task-monitor.mjs` maintain a model-free local status registry for WSL CLI, VS Code Codex, and Weixin-managed tmux tasks. Exact `任务`, `进度`, and `状态` commands read it directly.
-- `scripts/weixin-command-router.mjs` sends a small text heartbeat such as `task N · 处理中` before processing ordinary task messages. In interactive mode this heartbeat is the only dispatch acknowledgement; the router suppresses the redundant `interactive 已发送 / 已进入后台等待` reply. Immediate commands such as `list` / `列表` and `task close ...` / `任务 关闭 ...` reply normally.
+- `scripts/weixin-command-router.mjs` sends a small text heartbeat such as `手机会话 · 处理中` before processing ordinary phone-session messages. Immediate commands such as `历史`, `接管 N`, and `新会话` reply normally.
 - `scripts/weixin-command-router.mjs` starts interactive tasks with `codex --no-alt-screen -C <codexCwd>` plus the configured Codex global args, so Weixin can drive native CLI slash commands such as `/plan` and `/goal`.
 - `scripts/weixin-command-router.mjs` maps Weixin `plan ...` / `计划 ...` to `/plan ...`, and `goal ...` / `目标 ...` plus status/pause/resume/clear Chinese aliases to the native `/goal` command family.
 - `scripts/weixin-command-router.mjs` detects Codex interactive `Question 1/1` choice prompts in tmux output, sends the full question text and numbered options back to Weixin, and treats the next numeric Weixin reply as the selected option.
@@ -46,7 +46,7 @@ node /path/to/codex-weixin-notifier/scripts/onboard.mjs --help
 node /path/to/codex-weixin-notifier/scripts/onboard.mjs --channel feishu --platform lark --mode qr
 ```
 
-The supported CLI names are `weixin`, `feishu`, and `lark` as a Feishu platform. Short aliases may parse for compatibility, but user-facing instructions should prefer standard names. Onboard starts or restarts the router and treats receiving `task 0 [default,current]` after sending `list` as success. For Feishu/Lark, the first successful chat reply is saved as the default `notifyTargets` entry.
+The supported CLI names are `weixin`, `feishu`, and `lark` as a Feishu platform. Short aliases may parse for compatibility, but user-facing instructions should prefer standard names. Onboard starts or restarts the router and treats receiving a session list after sending `历史` as success. For Feishu/Lark, the first successful chat reply is saved as the default `notifyTargets` entry.
 
 ## Feishu and Lark Setup
 
@@ -162,7 +162,11 @@ Supported inbound Weixin commands:
 - `任务`: show all numbered Weixin tasks plus recent WSL CLI and VS Code Codex sessions.
 - `进度`: show only running, queued, starting, or waiting tasks with current stage and elapsed time.
 - `状态`: show Weixin router, tmux, WSL CLI, VS Code app-server, and lifecycle Hook health.
-- `task 0`, `task 1`, `task 2`, `任务 0`, `任务 1`, `任务 2`: enter an existing task, or create the next numeric task in order.
+- `历史`, `会话`: list recent local Codex, VS Code Codex, Claude Code, and opencode sessions.
+- `接管 N`: resume the numbered history entry for the current chat.
+- `当前会话`: show the current phone-session binding.
+- `退出接管`: clear the current binding without deleting history.
+- `新会话`, `新会话 claude`, `新会话 opencode`: start a new non-numbered phone session.
 - `task close 1`, `task close godot`, `任务 关闭 1`, `任务 关闭 godot`: close one or more non-default tasks by id or alias.
 - `task reset 1`, `task reset godot`, `任务 重置 1`, `任务 重置 godot`: clear Codex resume/session state for a non-running task without deleting files, aliases, historical log files, ids, or the task data directory; it also clears the task's previous run-log pointer so old session ids are not restored.
 - `task alias 1 godot`, `任务 别名 1 godot`, `task unalias godot`, `任务 取消别名 godot`, `task godot`, `任务 godot`: set, remove, or enter a task alias.

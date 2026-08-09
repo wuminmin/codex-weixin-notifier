@@ -88,8 +88,8 @@ test("chat help and onboard commands describe the current Lark bot", async () =>
   await withRuntimeConfig(config, async () => {
     const help = await taskCoreForTests.handleText("help", "oc_chat", config);
     assert.match(help, /Coding Agent Task Monitor/u);
-    assert.match(help, /list/u);
-    assert.match(help, /tool use codex/u);
+    assert.match(help, /历史/u);
+    assert.match(help, /新会话/u);
     const onboard = await taskCoreForTests.handleText("onboard", "oc_chat", config);
     assert.match(onboard, /--channel feishu --platform lark/u);
     assert.match(onboard, /catm/u);
@@ -97,22 +97,20 @@ test("chat help and onboard commands describe the current Lark bot", async () =>
   });
 });
 
-test("ordinary messages wait for an explicit agent selection and replay once", async () => {
+test("phone messages use a new current session instead of numbered tasks", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-notifier-selection-"));
   const config = runtime(home, "global", "main");
   await withRuntimeConfig(config, async () => {
     const waiting = await taskCoreForTests.handleText("inspect the repository", "oc_chat", config);
-    assert.match(waiting, /No coding agent selected/u);
-    assert.match(waiting, /tool use codex/u);
+    assert.match(waiting, /当前没有手机会话/u);
+    assert.match(waiting, /历史/u);
 
-    const selected = await taskCoreForTests.handleText("tool use codex", "oc_chat", config);
-    assert.match(selected, /Current agent: Codex/u);
-    assert.match(selected, /Replayed pending request/u);
-    assert.match(selected, /inspect the repository/u);
+    const selected = await taskCoreForTests.handleText("新会话", "oc_chat", config);
+    assert.match(selected, /Codex 会话 · 将启动/u);
+    const sent = await taskCoreForTests.handleText("inspect the repository", "oc_chat", config);
+    assert.match(sent, /Codex 会话 · 将发送/u);
 
-    const off = await taskCoreForTests.handleText("tool off", "oc_chat", config);
-    assert.match(off, /Current agent: none/u);
-    const blockedAgain = await taskCoreForTests.handleText("continue", "oc_chat", config);
-    assert.match(blockedAgain, /No coding agent selected/u);
+    const off = await taskCoreForTests.handleText("退出接管", "oc_chat", config);
+    assert.match(off, /已退出当前手机会话/u);
   });
 });
