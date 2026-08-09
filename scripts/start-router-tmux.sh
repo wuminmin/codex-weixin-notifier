@@ -108,21 +108,24 @@ if [ "$RESTART" -eq 1 ] && tmux has-session -t "$NOTIFIER_SESSION_NAME" 2>/dev/n
   tmux kill-session -t "$NOTIFIER_SESSION_NAME" 2>/dev/null || true
 fi
 
+ROUTER_ALREADY_RUNNING=0
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   pid="$(tmux display-message -p -t "$SESSION_NAME" "#{pane_pid}" 2>/dev/null || true)"
   write_pid "$pid"
   say "codex-wx-router: already running${pid:+ pid=$pid}"
-  exit 0
+  ROUTER_ALREADY_RUNNING=1
 fi
 
-if ! tmux new-session -d -s "$SESSION_NAME" -c "$PLUGIN_DIR" "$NODE_BIN" "$ROUTER_SCRIPT" "${ROUTER_ARGS[@]}"; then
-  say "codex-wx-router: failed to start tmux session: $SESSION_NAME"
-  exit 1
-fi
+if [ "$ROUTER_ALREADY_RUNNING" -eq 0 ]; then
+  if ! tmux new-session -d -s "$SESSION_NAME" -c "$PLUGIN_DIR" "$NODE_BIN" "$ROUTER_SCRIPT" "${ROUTER_ARGS[@]}"; then
+    say "codex-wx-router: failed to start tmux session: $SESSION_NAME"
+    exit 1
+  fi
 
-pid="$(tmux display-message -p -t "$SESSION_NAME" "#{pane_pid}" 2>/dev/null || true)"
-write_pid "$pid"
-say "codex-wx-router: started${pid:+ pid=$pid}"
+  pid="$(tmux display-message -p -t "$SESSION_NAME" "#{pane_pid}" 2>/dev/null || true)"
+  write_pid "$pid"
+  say "codex-wx-router: started${pid:+ pid=$pid}"
+fi
 
 if [ "$SKIP_NOTIFIER" -eq 0 ] && [ -f "$PLUGIN_DIR/$NOTIFIER_SCRIPT" ]; then
   if tmux has-session -t "$NOTIFIER_SESSION_NAME" 2>/dev/null; then

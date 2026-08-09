@@ -443,7 +443,7 @@ function parseClaudeTranscript(filePath, stat, projectDirName) {
     }
   }
   if (!cwd) cwd = decodeClaudeProjectDir(projectDirName);
-  const running = lastUserInputTs && timestampMs(lastUserInputTs) >= timestampMs(lastAssistantTs)
+  const running = lastUserInputTs && timestampMs(lastUserInputTs) > timestampMs(lastAssistantTs)
     && Date.now() - stat.mtimeMs <= FALLBACK_ACTIVE_WINDOW_MS;
   return {
     sessionId,
@@ -497,7 +497,23 @@ function discoverOpencodeSessions() {
        'id', id, 'directory', directory, 'title', title,
        'time_created', time_created, 'time_updated', time_updated,
        'time_archived', time_archived, 'time_compacting', time_compacting,
-       'model', model, 'agent', agent
+       'model', model, 'agent', agent,
+       'latest_user', (SELECT MAX(time_created) FROM message m
+                       WHERE m.session_id = session.id
+                         AND json_extract(m.data, '$.role') = 'user'),
+       'latest_assistant', (SELECT MAX(time_created) FROM message m
+                            WHERE m.session_id = session.id
+                              AND json_extract(m.data, '$.role') = 'assistant'),
+       'latest_completed', (SELECT json_extract(m.data, '$.time.completed')
+                            FROM message m
+                            WHERE m.session_id = session.id
+                              AND json_extract(m.data, '$.role') = 'assistant'
+                            ORDER BY m.time_created DESC LIMIT 1),
+       'latest_summary', (SELECT json_extract(p.data, '$.text')
+                          FROM part p
+                          WHERE p.session_id = session.id
+                            AND json_extract(p.data, '$.type') = 'text'
+                          ORDER BY p.time_created DESC LIMIT 1)
      )) AS rows
      FROM session
      WHERE time_updated >= ${cutoff}
@@ -510,7 +526,14 @@ function discoverOpencodeSessions() {
     if (!Number.isFinite(updatedMs)) continue;
     const archivedMs = Number(row.time_archived);
     if (Number.isFinite(archivedMs) && archivedMs > 0) continue;
-    const running = Date.now() - updatedMs <= FALLBACK_ACTIVE_WINDOW_MS;
+    const latestUserMs = Number(row.latest_user);
+    const latestAssistantMs = Number(row.latest_assistant);
+    const latestCompletedMs = Number(row.latest_completed);
+    const hasMessageState = Number.isFinite(latestUserMs) || Number.isFinite(latestAssistantMs);
+    const running = hasMessageState
+      ? latestUserMs > latestAssistantMs || (latestAssistantMs >= latestUserMs && !Number.isFinite(latestCompletedMs))
+      : Date.now() - updatedMs <= FALLBACK_ACTIVE_WINDOW_MS;
+    const completedMs = Number.isFinite(latestCompletedMs) ? latestCompletedMs : (running ? 0 : updatedMs);
     sessions.push({
       sessionId: row.id,
       source: "opencode",
@@ -518,10 +541,10 @@ function discoverOpencodeSessions() {
       status: running ? "running" : "completed",
       stage: running ? "分析处理中" : "本轮已完成",
       prompt: compact(row.title || "", 240),
-      summary: "",
+      summary: compact(row.latest_summary || "", 320),
       createdAt: new Date(Number(row.time_created)).toISOString(),
       startedAt: "",
-      completedAt: running ? "" : new Date(updatedMs).toISOString(),
+      completedAt: running ? "" : new Date(completedMs || updatedMs).toISOString(),
       updatedAt: new Date(updatedMs).toISOString(),
       transcriptPath: "",
       discovery: "opencode-sqlite",

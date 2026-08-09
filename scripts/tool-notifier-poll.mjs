@@ -52,7 +52,7 @@ function log(message) {
 }
 
 function stateKey(view) {
-  return `${view.source}:${view.sessionId}`;
+  return `${String(view.source || "unknown").toLowerCase()}:${view.sessionId}`;
 }
 
 function sourceLabel(source) {
@@ -99,12 +99,16 @@ function buildEvent(view) {
   };
 }
 
-function poll() {
-  const views = localSessionViews();
-  const relevant = views.filter((view) => NOTIFY_SOURCES.has(String(view.source).toLowerCase()));
-  const state = readJson(STATE_PATH, { sessions: {} });
+function pollViews(views, options = {}) {
+  const sources = options.sources || NOTIFY_SOURCES;
+  const relevant = views.filter((view) => sources.has(String(view.source).toLowerCase()));
+  const targetStatePath = options.statePath || STATE_PATH;
+  const dryRun = options.dryRun ?? DRY_RUN;
+  const notify = options.notify || spawnNotify;
+  const currentMs = Number(options.nowMs) || Date.now();
+  const state = readJson(targetStatePath, { sessions: {} });
   if (!state.sessions || typeof state.sessions !== "object") state.sessions = {};
-  const now = new Date().toISOString();
+  const now = new Date(currentMs).toISOString();
   let changed = false;
   let notifications = 0;
 
@@ -120,24 +124,34 @@ function poll() {
         prompt: view.prompt,
         summary: view.summary,
         firstSeenAt: now,
-        lastActiveAt: view.updatedAt,
+        lastActiveAt: view.updatedAt || now,
+        lastSeenAt: now,
       };
       changed = true;
       log(`discovered ${key}: status=${view.status}`);
       continue;
     }
-    if (prev.status !== view.status) {
+    const previousStatus = prev.status;
+    if (previousStatus !== view.status) {
       log(`${key}: ${prev.status} -> ${view.status}`);
-      if (prev.status === "running" && view.status === "completed" && !prev.notifiedAt) {
+      if (previousStatus === "running" && view.status === "completed" && !prev.notifiedAt) {
         const event = buildEvent(view);
         log(`notify ${key}: ${event.task}`);
-        if (!DRY_RUN) spawnNotify(event);
+        if (!dryRun) notify(event);
         else log(`[dry-run] would notify: ${JSON.stringify(event)}`);
         prev.notifiedAt = now;
         notifications += 1;
       }
       prev.status = view.status;
-      prev.lastActiveAt = view.updatedAt;
+      changed = true;
+    }
+    const activityAt = view.updatedAt || view.completedAt || view.startedAt || now;
+    if (Date.parse(activityAt) > Date.parse(prev.lastActiveAt || "")) {
+      prev.lastActiveAt = activityAt;
+      changed = true;
+    }
+    if (view.prompt && view.prompt !== prev.prompt) {
+      prev.prompt = view.prompt;
       changed = true;
     }
     if (view.summary && view.summary !== prev.summary) {
@@ -148,10 +162,14 @@ function poll() {
       prev.cwd = view.cwd;
       changed = true;
     }
+    if (prev.lastSeenAt !== now) {
+      prev.lastSeenAt = now;
+      changed = true;
+    }
     state.sessions[key] = prev;
   }
 
-  const purgeCutoff = Date.now() - PURGE_AFTER_MS;
+  const purgeCutoff = currentMs - PURGE_AFTER_MS;
   for (const [key, entry] of Object.entries(state.sessions)) {
     const lastMs = Date.parse(entry.lastActiveAt || entry.firstSeenAt || "");
     if (Number.isFinite(lastMs) && lastMs < purgeCutoff) {
@@ -164,12 +182,16 @@ function poll() {
   if (changed) {
     state.updatedAt = now;
     try {
-      atomicWriteJson(STATE_PATH, state);
+      atomicWriteJson(targetStatePath, state);
     } catch (err) {
       log(`state write error: ${err.message}`);
     }
   }
   return { views: relevant.length, notifications };
+}
+
+function poll() {
+  return pollViews(localSessionViews());
 }
 
 async function main() {
@@ -202,4 +224,4 @@ if (isMain) {
   });
 }
 
-export { poll, buildEvent, spawnNotify };
+export { poll, pollViews, buildEvent, spawnNotify };

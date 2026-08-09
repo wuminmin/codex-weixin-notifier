@@ -204,6 +204,8 @@ node scripts/notify.mjs \
 
 `--target` accepts the target `id` or `chatId`. Feishu notification targets use `chatId` for either a group or a direct-message conversation. Feishu replies use native rich text/Markdown and SDK chunking; Weixin continues to render Markdown as long images by default. `task snap` remains a PNG on both channels.
 
+The independent tool completion poller watches `claude` and `opencode` session views every 60 seconds by default and fans out only a persisted `running → completed` transition. Configure it with `CODEX_TOOL_NOTIFIER_INTERVAL_MS`, `CODEX_TOOL_NOTIFIER_SOURCES=claude,opencode`, and `CODEX_TOOL_NOTIFIER_DRY_RUN=1`. Records inactive for seven days are removed automatically; restarting the router does not re-send a session already marked as notified.
+
 ## Pair Weixin
 
 Run this in your WSL terminal so the QR code is visible:
@@ -314,6 +316,14 @@ wsl.exe -- bash -lc "/path/to/codex-weixin-notifier/scripts/start-router-tmux.sh
 /path/to/codex-weixin-notifier/scripts/start-router-tmux.sh --restart
 ```
 
+The same script also keeps the independent `codex-wx-tool-notifier` poller running. Use `--skip-tool-notifier` when only the channel router should run. The poller state is stored separately from Codex tasks:
+
+```text
+~/.codex/weixin-notifier/tool-notifier-state.json
+~/.codex/weixin-notifier/tool-tasks.json
+~/.codex/weixin-notifier/tool-current.json
+```
+
 When the current Codex task is the same CLI session performing an update, use `scripts/restart-router-after-task-idle.sh codex-wx-task-N` in a separate tmux session. It waits for the visible `Working (...)` indicator to clear, then restarts the router and all active managed CLI task sessions.
 
 The router stores state in:
@@ -349,6 +359,13 @@ task tmux clean
 任务 tmux 清理
 task snap
 任务 截图
+claude 1
+claude 1 review this project
+opencode 1
+opencode 1 inspect the build
+tool list
+tool close claude 1
+tool off
 pwd
 当前目录
 ls
@@ -399,7 +416,9 @@ ls
 
 `任务`, `进度`, and `状态` are exact local commands and never reach Codex. On the legacy Weixin bot, `任务` merges numbered Weixin tasks with recent WSL CLI and VS Code sessions, `进度` keeps only running or waiting work, and `状态` reports router, tmux, CLI, VS Code app-server, and Hook health. On Feishu, these views are scoped to the current `{account, bot}` namespace so another bot's tasks and paths never appear. `list` / `列表` keeps the numbered-task-only view on either channel.
 
-`task 0` / `任务 0` is the default Codex assistant and always exists. `task 1` / `任务 1`, `task 2` / `任务 2`, and later tasks are explicit task slots created only by `task N` or `任务 N` commands. The router handles exact English commands such as `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot`, plus Chinese equivalents such as `列表`, `任务 N`, `任务 关闭 N`, `任务 重置 N`, `任务 别名 N name`, `任务 name`, `任务 tmux 清理`, and `任务 截图`. It also accepts a small WSL command whitelist: `pwd` / `当前目录`, `ls` / `列文件`, and `ls` / `列文件` with one optional path or common flags such as `-la`. Every other Weixin message is forwarded to the current task.
+`task 0` / `任务 0` is the default Codex assistant and always exists. `task 1` / `任务 1`, `task 2` / `任务 2`, and later tasks are explicit task slots created only by `task N` or `任务 N` commands. The router handles exact English commands such as `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot`, plus Chinese equivalents such as `列表`, `任务 N`, `任务 关闭 N`, `任务 重置 N`, `任务 别名 N name`, `任务 name`, `任务 tmux 清理`, and `任务 截图`. It also accepts a small WSL command whitelist: `pwd` / `当前目录`, `ls` / `列文件`, and `ls` / `列文件` with one optional path or common flags such as `-la`. When no tool slot is selected, every other message is forwarded to the current Codex task.
+
+Claude Code and opencode are separate from the numbered Codex task system. `claude N` and `opencode N` select or create independent tool slots, start a dedicated tmux session, and optionally send the rest of the message as a prompt. After selecting a tool slot, ordinary messages are forwarded to that tool until `tool off` / `工具退出`; `task N` continues to address Codex tasks. Tool watchers persist their tmux session, prompt, reply context, and choice state in `tool-tasks.json`, resume after a router restart, detect common numbered choice prompts, and send the final pane output back to the originating chat. `tool close claude N` or `tool close opencode N` stops a tool session.
 
 ## Local Task Monitor
 

@@ -32,6 +32,13 @@ import {
   sendFeishuMarkdown,
   sendFeishuMedia,
 } from "./lib/feishu-channel.mjs";
+import {
+  forwardToSelectedTool,
+  handleToolCommand,
+  hasSelectedTool,
+  parseToolCommand,
+  resumeToolWatchers,
+} from "./tool-command-router.mjs";
 
 const STATE_DIR = "~/.codex/weixin-notifier";
 const TASK_WORKSPACE_ROOT = "~/codex";
@@ -1314,6 +1321,16 @@ async function sendTextWithMedia(text, config, args = {}) {
     }
   }
   if (!parsed.text && parsed.media.length === 0) await sendText(text, config, args);
+}
+
+function toolRouterDeps(config) {
+  return {
+    sendText,
+    sendTextWithMedia,
+    serializableReplyContext,
+    configWithReplyContext,
+    log: (error) => appendRouterError(config, `tool router send failed: ${error?.stack || error?.message || error}`),
+  };
 }
 
 function extractSessionId(value) {
@@ -2710,7 +2727,7 @@ function forwardToTask(task, text, config, fromUser = "", attachments = [], opti
 
   const runner = task.runner || "codex";
   if (runner === "claude" || runner === "opencode") {
-    return forwardToExecTask(task, instruction, config, fromUser, attachments, options);
+    return `${taskHeader(task.id, "旧工具任务")}\n此任务属于旧版 direct-spawn 路由，已与 Codex task 隔离。请改用 ${runner} 1 / ${runner} 1 <提示词> 创建独立 tmux 会话。`;
   }
 
   const simpleCommand = attachments.length === 0 ? parsedSimpleCommand(instruction) : null;
@@ -3136,6 +3153,13 @@ function formatHelp() {
     "task reset N / 任务 重置 N - 重置非运行中任务",
     "task snap / 任务 截图 - 发送当前任务终端截图",
     "",
+    "工具会话（独立于 Codex task）:",
+    "claude N [提示词] - 创建/进入 Claude Code tmux 会话并发送提示词",
+    "opencode N [提示词] - 创建/进入 opencode tmux 会话并发送提示词",
+    "tool list / 工具列表 - 查看工具会话",
+    "tool close claude N - 关闭工具会话",
+    "tool off / 工具退出 - 回到 Codex task",
+    "",
     "配置:",
     "onboard / 配置 - 查看当前配置和重新配置入口",
     "终端运行: node scripts/onboard.mjs",
@@ -3195,14 +3219,8 @@ function parseCommand(text) {
   }
   const taskMatch = trimmed.match(new RegExp(`^${taskKeyword}\\s+(\\S+)$`, "iu"));
   if (taskMatch) return { type: "enter", target: taskMatch[1] };
-  const claudeEnterMatch = trimmed.match(/^claude\s+(\S+)(?:\s+([\s\S]+))?$/iu);
-  if (claudeEnterMatch) {
-    return { type: "enter", target: claudeEnterMatch[1], runner: "claude", text: claudeEnterMatch[2] || "" };
-  }
-  const opencodeEnterMatch = trimmed.match(/^opencode\s+(\S+)(?:\s+([\s\S]+))?$/iu);
-  if (opencodeEnterMatch) {
-    return { type: "enter", target: opencodeEnterMatch[1], runner: "opencode", text: opencodeEnterMatch[2] || "" };
-  }
+  const toolCommand = parseToolCommand(trimmed);
+  if (toolCommand) return { type: "tool", command: toolCommand };
   return { type: "message", text: trimmed };
 }
 
@@ -3220,7 +3238,11 @@ async function handleText(text, fromUser, config, options = {}) {
   if (command.type === "unalias") return unsetTaskAlias(command.target, { dryRun: Boolean(config.dryRun) });
   if (command.type === "reset") return resetTaskTargets(command.targets, { dryRun: Boolean(config.dryRun) });
   if (command.type === "close") return closeTaskTargets(command.targets, fromUser, { dryRun: Boolean(config.dryRun) });
+  if (command.type === "tool") {
+    return handleToolCommand(command.command, fromUser, config, options, toolRouterDeps(config));
+  }
   if (command.type === "enter") {
+    if (!command.runner) await handleToolCommand({ type: "off" }, fromUser, config, options, toolRouterDeps(config));
     const enterMessage = enterTask(command.target, fromUser, {
       runner: command.runner,
       dryRun: Boolean(config.dryRun),
@@ -3234,6 +3256,9 @@ async function handleText(text, fromUser, config, options = {}) {
     return enterMessage;
   }
 
+  if (hasSelectedTool(config, fromUser)) {
+    return forwardToSelectedTool(command.text, fromUser, config, options, [], toolRouterDeps(config));
+  }
   const task = getCurrentTask(fromUser);
   if (!task) return "task 0: 状态异常，未找到默认任务。";
   return forwardToTask(task, command.text, config, fromUser, [], options);
@@ -3241,6 +3266,9 @@ async function handleText(text, fromUser, config, options = {}) {
 
 async function handleTextWithAttachments(text, fromUser, config, attachments = [], options = {}) {
   if (attachments.length === 0) return handleText(text, fromUser, config, options);
+  if (hasSelectedTool(config, fromUser)) {
+    return forwardToSelectedTool(text, fromUser, config, options, attachments, toolRouterDeps(config));
+  }
   const task = getCurrentTask(fromUser);
   if (!task) return "task 0: 状态异常，未找到默认任务。";
   const savedAttachments = await saveInboundMediaForTask(task, attachments, config);
@@ -3248,6 +3276,11 @@ async function handleTextWithAttachments(text, fromUser, config, attachments = [
 }
 
 function inboundHeartbeatText(text, fromUser, attachments = []) {
+  if (hasSelectedTool(currentRuntimeConfig(), fromUser)) {
+    const command = parseCommand(text);
+    if (attachments.length > 0 || command.type === "message") return "tool · 处理中";
+    return "";
+  }
   const task = getCurrentTask(fromUser);
   if (!task) return "";
   if (attachments.length > 0) return taskHeader(task.id, "处理中");
@@ -3341,6 +3374,10 @@ function initializeRuntime(args, config) {
   const resumedWatchers = resumePersistedInteractiveWatchers(config, args);
   if (resumedWatchers.length > 0) {
     process.stdout.write(`[${config.namespace}] Resumed interactive watchers: ${resumedWatchers.map((task) => `${task.id}:${task.sessionName}`).join(", ")}\n`);
+  }
+  const resumedToolWatchers = resumeToolWatchers(config, args, toolRouterDeps(config));
+  if (resumedToolWatchers.length > 0) {
+    process.stdout.write(`[${config.namespace}] Resumed tool watchers: ${resumedToolWatchers.map((task) => `${task.runner}${task.id}:${task.sessionName}`).join(", ")}\n`);
   }
 }
 
