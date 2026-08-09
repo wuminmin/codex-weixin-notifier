@@ -1,6 +1,6 @@
-# 编码智能体任务监控
+# Coding Agent Task Monitor
 
-面向 Claude Code、opencode 和 Codex 的编码智能体任务监控工具：通过微信、飞书和 Lark 路由任务、监控状态并发送完成通知。Feishu/Lark 支持多个企业账号和多个应用机器人；每个机器人拥有隔离的任务池、附件目录、状态空间和 tmux 会话。
+A task monitoring and routing tool for Claude Code, opencode, and Codex. It routes tasks through Weixin, Feishu, and Lark, monitors task state, and sends completion notifications. Feishu/Lark supports multiple enterprise accounts and application bots; every bot has an isolated task pool, attachment tree, state namespace, and tmux sessions.
 
 ## Install
 
@@ -74,7 +74,7 @@ catm --channel feishu --platform lark --mode qr --account global-a --bot codex-m
 
 First-run journey:
 
-1. Run the installer; in a TTY it starts `onboard.mjs`.
+1. Run the installer; in a TTY it starts the `catm` onboarding command.
 2. Choose `weixin` or `feishu`; for `feishu`, choose `Feishu China` or `Lark international`.
 3. Choose QR scan or manual input. Secrets are hidden during manual input.
 4. Complete any Feishu/Lark developer-console publish, permission approval, long-connection, and bot-add steps.
@@ -89,7 +89,7 @@ First-run journey:
 - `scripts/weixin-command-router.mjs` contains the compatibility Weixin entry and the shared numbered-task core. Routing context is `{channel, account, bot, conversation}`; task pools are shared only inside one bot, while each conversation stores its own current task.
 - `scripts/notify.mjs` is the general completion sender. It performs best-effort fan-out to the configured Weixin bot and every enabled entry in Feishu `notifyTargets`; `scripts/notify-weixin.mjs` remains a Weixin-only compatibility entry.
 - `scripts/setup-feishu.mjs` supports hidden interactive App ID/Secret entry, official SDK QR application registration, credential checks, Feishu/Lark platform selection, and mode-`0600` config writes.
-- `scripts/codex-task-state-hook.mjs` records Codex lifecycle events from WSL CLI and VS Code into a small local session registry. `scripts/codex-task-monitor.mjs` merges that registry with Weixin-managed tmux tasks and renders the fixed `任务`, `进度`, and `状态` views without invoking a model.
+- `scripts/codex-task-state-hook.mjs` records Codex lifecycle events from WSL CLI and VS Code into a small local session registry. `scripts/codex-task-monitor.mjs` merges that registry with Weixin-managed tmux tasks and renders the fixed `任务` (tasks), `进度` (progress), and `状态` (status) views without invoking a model.
 - Multiple Codex processes are separated by `CODEX_SESSION_ID`, `CODEX_RUN_ID`, or an explicit `--session`; without one, the sender creates a short process-derived id.
 - The Weixin transport is based on the official iLink API shape used by `@tencent-weixin/openclaw-weixin`; it does not require the OpenClaw CLI or gateway at runtime.
 - The Feishu/Lark transport uses the official [`@larksuiteoapi/node-sdk` Channel](https://github.com/larksuite/node-sdk/blob/main/docs/channel.md), including WebSocket reconnect, message normalization, deduplication, per-chat ordering, native Markdown chunking, media APIs, and group `@bot` policy.
@@ -373,9 +373,7 @@ ls
 ls /path/to/project
 列文件 /path/to/project
 add tests for codex-weixin-notifier
-给 codex-weixin-notifier 加测试
-continue by updating the README too
-继续把 README 也更新
+update the README too
 ```
 
 The command vocabulary is intentionally small:
