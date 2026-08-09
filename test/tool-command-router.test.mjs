@@ -29,7 +29,38 @@ test("tool commands parse into isolated runner sessions", () => {
   assert.deepEqual(toolRouterForTests.parseToolCommand("tool close claude 1"), {
     type: "close", runner: "claude", target: "1",
   });
+  assert.deepEqual(toolRouterForTests.parseToolCommand("tool use claude"), {
+    type: "select", runner: "claude", target: "", text: "", deferred: true,
+  });
+  assert.deepEqual(toolRouterForTests.parseToolCommand("工具 使用 opencode 2"), {
+    type: "select", runner: "opencode", target: "2", text: "", deferred: true,
+  });
+  assert.deepEqual(toolRouterForTests.parseToolCommand("tool doctor"), { type: "doctor" });
   assert.deepEqual(toolRouterForTests.parseToolCommand("工具退出"), { type: "off" });
+});
+
+test("agent selection is lazy and doctor works without installed agents", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-tool-control-"));
+  const config = {
+    ...runtime(home),
+    dryRun: true,
+    codexCommand: "missing-codex",
+    claudeCommand: "missing-claude",
+    opencodeCommand: "missing-opencode",
+  };
+  const selected = await withRuntimeConfig(config, () => taskCoreForTests.handleText("tool use claude", "chat-a", config));
+  assert.match(selected, /Current agent: Claude Code/u);
+  assert.match(selected, /not installed/u);
+  const toolState = JSON.parse(fs.readFileSync(path.join(home, "state", "tool-tasks.json"), "utf8"));
+  assert.equal(toolState.tasks["claude:1"].status, "ready");
+  assert.equal(toolState.tasks["claude:1"].tmuxSession, "");
+  const doctor = await withRuntimeConfig(config, () => taskCoreForTests.handleText("tool doctor", "chat-a", config));
+  assert.match(doctor, /Codex: missing/u);
+  assert.match(doctor, /Claude Code: missing/u);
+  assert.match(doctor, /Router: ready/u);
+  const blocked = await withRuntimeConfig({ ...config, dryRun: false }, () => taskCoreForTests.handleText("run it", "chat-a", { ...config, dryRun: false }));
+  assert.match(blocked, /任务未执行/u);
+  assert.match(blocked, /not installed/u);
 });
 
 test("Claude and opencode tool tasks do not create or reuse Codex tasks", async () => {

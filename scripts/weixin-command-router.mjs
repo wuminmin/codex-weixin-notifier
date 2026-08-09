@@ -10,6 +10,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { fileURLToPath } from "node:url";
 import { renderMarkdownImages, terminalSnapshotMarkdown } from "./markdown-image-renderer.mjs";
 import {
+  HELP_TOPICS,
+  allCommandLines,
+  normalizeHelpTopic,
+} from "./command-registry.mjs";
+import {
   formatSystemStatus,
   formatTaskOverview,
   formatTaskProgress,
@@ -37,7 +42,13 @@ import {
   handleToolCommand,
   hasSelectedTool,
   parseToolCommand,
+  pendingCount,
+  queuePending,
   resumeToolWatchers,
+  selectedRunner as selectedToolRunner,
+  takePending,
+  setSelectedRunner,
+  toolDoctor as toolDoctorStatus,
 } from "./tool-command-router.mjs";
 
 const STATE_DIR = "~/.codex/weixin-notifier";
@@ -2754,6 +2765,8 @@ function forwardToTask(task, text, config, fromUser = "", attachments = [], opti
     addedAt: new Date().toISOString(),
   };
 
+  if (config.dryRun) return `${taskHeader(task.id, "dry-run")}\n${instruction}`;
+
   if (["running", "starting", "queued"].includes(task.status)) {
     const updated = updateTask(task.id, (current) => ({
       ...current,
@@ -3136,38 +3149,42 @@ function channelDisplayName(config = currentRuntimeConfig()) {
   return normalizeFeishuPlatform(config.platform) === "lark" ? "Lark 国际版" : "飞书 / Feishu";
 }
 
-function formatHelp() {
+function formatHelp(topic = "", fromUser = "") {
   const config = currentRuntimeConfig();
-  const lines = [
-    `${channelDisplayName(config)} Codex Notifier help`,
-    "",
-    "健康检查:",
-    "list / 列表 - 查看任务列表和 task 0",
-    "状态 - 查看连接、任务目录和运行状态",
-    "进度 - 查看运行中任务",
-    "",
-    "任务:",
-    "task 0 / 任务 0 - 进入默认 Codex 助理",
-    "task N / 任务 N - 创建或进入编号任务",
-    "task close N / 任务 关闭 N - 关闭任务",
-    "task reset N / 任务 重置 N - 重置非运行中任务",
-    "task snap / 任务 截图 - 发送当前任务终端截图",
-    "",
-    "工具会话（独立于 Codex task）:",
-    "claude N [提示词] - 创建/进入 Claude Code tmux 会话并发送提示词",
-    "opencode N [提示词] - 创建/进入 opencode tmux 会话并发送提示词",
-    "tool list / 工具列表 - 查看工具会话",
-    "tool close claude N - 关闭工具会话",
-    "tool off / 工具退出 - 回到 Codex task",
-    "",
-    "配置:",
-    "onboard / 配置 - 查看当前配置和重新配置入口",
-    "终端运行: node scripts/onboard.mjs",
-  ];
-  if (config.channel === "feishu") {
-    lines.push("", "群聊使用: @bot list；私聊可直接发送 list。");
+  const normalized = normalizeHelpTopic(topic);
+  const runner = selectedToolRunner(config, fromUser);
+  const runtimeLabel = runner === "claude" ? "Claude Code:" : runner === "opencode" ? "opencode:" : "Codex:";
+  const runtimeLine = runner
+    ? toolDoctorStatus(config).split("\n").find((line) => line.startsWith(runtimeLabel))
+    : "use tool doctor to inspect";
+  const contextLines = [`Current agent: ${runner || "none"}`, `Runtime: ${runtimeLine || "use tool doctor to inspect"}`];
+  if (normalized === "all" || normalized === "全部") {
+    return [contextLines.join("\n"), "", ...allCommandLines()].join("\n");
   }
-  return lines.join("\n");
+  if (HELP_TOPICS[normalized]) return [...contextLines, "", ...HELP_TOPICS[normalized]].join("\n");
+  return [
+    "Coding Agent Task Monitor",
+    ...contextLines,
+    "",
+    "Quick start:",
+    "  tool use codex",
+    "  tool use claude",
+    "  tool use opencode",
+    "",
+    "Help topics:",
+    "  help start / 帮助 入门",
+    "  help agent / 帮助 智能体",
+    "  help task / 帮助 任务",
+    "  help monitor / 帮助 监控",
+    "  help files / 帮助 文件",
+    "  help admin / 帮助 管理",
+    "  help all / 帮助 全部",
+    "",
+    "Common controls:",
+    "  list / 列表    status / 状态    progress / 进度",
+    "  tool list / 工具列表    tool doctor / 工具诊断",
+    "  tool off / 工具退出",
+  ].join("\n");
 }
 
 function formatOnboardStatus() {
@@ -3182,8 +3199,8 @@ function formatOnboardStatus() {
     "",
     "重新配置:",
     config.channel === "feishu"
-      ? `node scripts/onboard.mjs --channel feishu --platform ${normalizeFeishuPlatform(config.platform)} --account ${config.account || "default"} --bot ${config.bot || "codex-main"}`
-      : "node scripts/onboard.mjs --channel weixin",
+      ? `catm --channel feishu --platform ${normalizeFeishuPlatform(config.platform)} --account ${config.account || "default"} --bot ${config.bot || "codex-main"}`
+      : "catm --channel weixin",
   ];
   return lines.join("\n");
 }
@@ -3191,11 +3208,12 @@ function formatOnboardStatus() {
 function parseCommand(text) {
   const trimmed = String(text || "").trim();
   const taskKeyword = "(?:task|任务)";
-  if (/^(?:help|帮助|\?)$/iu.test(trimmed)) return { type: "help" };
+  const helpMatch = trimmed.match(/^(?:help|帮助)(?:\s+(.+))?$/iu);
+  if (helpMatch || trimmed === "?") return { type: "help", topic: normalizeHelpTopic(helpMatch?.[1] || "") };
   if (/^(?:onboard|配置|设置)$/iu.test(trimmed)) return { type: "onboard" };
-  if (/^任务$/u.test(trimmed)) return { type: "monitor-tasks" };
-  if (/^进度$/u.test(trimmed)) return { type: "monitor-progress" };
-  if (/^状态$/u.test(trimmed)) return { type: "monitor-status" };
+  if (/^(?:tasks|任务)$/iu.test(trimmed)) return { type: "monitor-tasks" };
+  if (/^(?:progress|进度)$/iu.test(trimmed)) return { type: "monitor-progress" };
+  if (/^(?:status|状态)$/iu.test(trimmed)) return { type: "monitor-status" };
   if (/^(?:list|列表|任务列表|列任务|查看任务)$/iu.test(trimmed)) return { type: "list" };
   if (/^(?:task|任务)\s+tmux\s+(?:clean|清理)$/iu.test(trimmed) || /^清理\s*tmux$/iu.test(trimmed)) {
     return { type: "tmux-clean" };
@@ -3224,9 +3242,24 @@ function parseCommand(text) {
   return { type: "message", text: trimmed };
 }
 
+function agentSelectionGuide(config, fromUser) {
+  const pending = pendingCount(config, fromUser);
+  return [
+    "No coding agent selected.",
+    pending > 0 ? `${pending} task request(s) are waiting and will replay once you choose an agent.` : null,
+    "",
+    "Choose one:",
+    "tool use codex",
+    "tool use claude",
+    "tool use opencode",
+    "",
+    "Run tool doctor to inspect the local environment.",
+  ].filter(Boolean).join("\n");
+}
+
 async function handleText(text, fromUser, config, options = {}) {
   const command = parseCommand(text);
-  if (command.type === "help") return formatHelp();
+  if (command.type === "help") return formatHelp(command.topic, fromUser);
   if (command.type === "onboard") return formatOnboardStatus();
   if (command.type === "monitor-tasks") return config.channel === "weixin" ? formatTaskOverview(fromUser) : formatList(fromUser);
   if (command.type === "monitor-progress") return config.channel === "weixin" ? formatTaskProgress(fromUser) : formatChannelProgress(fromUser);
@@ -3238,11 +3271,26 @@ async function handleText(text, fromUser, config, options = {}) {
   if (command.type === "unalias") return unsetTaskAlias(command.target, { dryRun: Boolean(config.dryRun) });
   if (command.type === "reset") return resetTaskTargets(command.targets, { dryRun: Boolean(config.dryRun) });
   if (command.type === "close") return closeTaskTargets(command.targets, fromUser, { dryRun: Boolean(config.dryRun) });
+  if (command.type === "message") {
+    const localCommand = parsedSimpleCommand(command.text);
+    if (localCommand) return runSimpleCommand(getCurrentTask(fromUser), localCommand);
+  }
   if (command.type === "tool") {
-    return handleToolCommand(command.command, fromUser, config, options, toolRouterDeps(config));
+    const response = await handleToolCommand(command.command, fromUser, config, options, toolRouterDeps(config));
+    if (command.command?.type === "select" && command.command.deferred) {
+      const pending = takePending(config, fromUser);
+      if (pending.length > 0) {
+        const replayed = [];
+        for (const item of pending) {
+          replayed.push(await handleTextWithAttachments(item.text, fromUser, config, item.attachments || [], options));
+        }
+        return [response, "", "Replayed pending request(s):", ...replayed].join("\n");
+      }
+    }
+    return response;
   }
   if (command.type === "enter") {
-    if (!command.runner) await handleToolCommand({ type: "off" }, fromUser, config, options, toolRouterDeps(config));
+    if (!command.runner) setSelectedRunner(config, fromUser, "codex");
     const enterMessage = enterTask(command.target, fromUser, {
       runner: command.runner,
       dryRun: Boolean(config.dryRun),
@@ -3259,6 +3307,12 @@ async function handleText(text, fromUser, config, options = {}) {
   if (hasSelectedTool(config, fromUser)) {
     return forwardToSelectedTool(command.text, fromUser, config, options, [], toolRouterDeps(config));
   }
+  const runner = selectedToolRunner(config, fromUser);
+  if (!runner) {
+    queuePending(config, fromUser, { text: command.text, attachments: [] });
+    return agentSelectionGuide(config, fromUser);
+  }
+  if (runner !== "codex") return agentSelectionGuide(config, fromUser);
   const task = getCurrentTask(fromUser);
   if (!task) return "task 0: 状态异常，未找到默认任务。";
   return forwardToTask(task, command.text, config, fromUser, [], options);
@@ -3269,6 +3323,12 @@ async function handleTextWithAttachments(text, fromUser, config, attachments = [
   if (hasSelectedTool(config, fromUser)) {
     return forwardToSelectedTool(text, fromUser, config, options, attachments, toolRouterDeps(config));
   }
+  const runner = selectedToolRunner(config, fromUser);
+  if (!runner) {
+    queuePending(config, fromUser, { text, attachments });
+    return agentSelectionGuide(config, fromUser);
+  }
+  if (runner !== "codex") return agentSelectionGuide(config, fromUser);
   const task = getCurrentTask(fromUser);
   if (!task) return "task 0: 状态异常，未找到默认任务。";
   const savedAttachments = await saveInboundMediaForTask(task, attachments, config);
@@ -3281,6 +3341,8 @@ function inboundHeartbeatText(text, fromUser, attachments = []) {
     if (attachments.length > 0 || command.type === "message") return "tool · 处理中";
     return "";
   }
+  const runner = selectedToolRunner(currentRuntimeConfig(), fromUser);
+  if (!runner) return "";
   const task = getCurrentTask(fromUser);
   if (!task) return "";
   if (attachments.length > 0) return taskHeader(task.id, "处理中");

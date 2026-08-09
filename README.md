@@ -2,6 +2,8 @@
 
 A task monitoring and routing tool for Claude Code, opencode, and Codex. It routes tasks through Weixin, Feishu, and Lark, monitors task state, and sends completion notifications. Feishu/Lark supports multiple enterprise accounts and application bots; every bot has an isolated task pool, attachment tree, state namespace, and tmux sessions.
 
+The project itself does not depend on an AI model. Its control plane—routing, help, status, diagnostics, session selection, and notifications—works even when Codex, Claude Code, and opencode are not installed. An agent is checked and started only when a selected agent receives a task.
+
 ## Install
 
 Review the installer first if you want to inspect what it does:
@@ -37,8 +39,8 @@ Requirements:
 
 - Node.js 20 or newer.
 - `git` and `npm`.
-- `tmux` for interactive command routing.
-- Codex CLI if you want the plugin registered in Codex.
+- `tmux` is only required when an execution session is started.
+- Codex CLI, Claude Code, or opencode is only required for tasks sent to that agent. The router and control commands work without any agent installed.
 - A Feishu or Lark enterprise self-built app for Feishu/Lark routing. Custom group webhooks are not supported because they cannot receive messages.
 
 Installer overrides:
@@ -80,6 +82,7 @@ First-run journey:
 4. Complete any Feishu/Lark developer-console publish, permission approval, long-connection, and bot-add steps.
 5. Onboard starts the shared router. Send `list` in Weixin/Feishu/Lark, or `@bot list` in a Feishu/Lark group.
 6. When you receive `task 0 [default,current]`, onboard records success. Feishu/Lark also remembers that chat as the default completion-notification target.
+7. Choose an execution agent with `tool use codex`, `tool use claude`, or `tool use opencode` before sending a task.
 
 ## Architecture
 
@@ -343,6 +346,16 @@ list
 任务
 进度
 状态
+help
+help agent
+帮助 智能体
+tool use codex
+tool use claude
+tool use opencode
+tool doctor
+工具诊断
+tool off
+工具退出
 task 0
 任务 0
 task 1
@@ -384,6 +397,20 @@ list
 任务
 进度
 状态
+help
+help start
+help agent
+help task
+help monitor
+help files
+help admin
+help all
+tool use codex
+tool use claude [N]
+tool use opencode [N]
+tool list
+tool doctor
+tool off
 task 0
 任务 0
 task 1
@@ -414,9 +441,9 @@ ls
 
 `任务`, `进度`, and `状态` are exact local commands and never reach Codex. On the legacy Weixin bot, `任务` merges numbered Weixin tasks with recent WSL CLI and VS Code sessions, `进度` keeps only running or waiting work, and `状态` reports router, tmux, CLI, VS Code app-server, and Hook health. On Feishu, these views are scoped to the current `{account, bot}` namespace so another bot's tasks and paths never appear. `list` / `列表` keeps the numbered-task-only view on either channel.
 
-`task 0` / `任务 0` is the default Codex assistant and always exists. `task 1` / `任务 1`, `task 2` / `任务 2`, and later tasks are explicit task slots created only by `task N` or `任务 N` commands. The router handles exact English commands such as `list`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot`, plus Chinese equivalents such as `列表`, `任务 N`, `任务 关闭 N`, `任务 重置 N`, `任务 别名 N name`, `任务 name`, `任务 tmux 清理`, and `任务 截图`. It also accepts a small WSL command whitelist: `pwd` / `当前目录`, `ls` / `列文件`, and `ls` / `列文件` with one optional path or common flags such as `-la`. When no tool slot is selected, every other message is forwarded to the current Codex task.
+`task 0` / `任务 0` explicitly selects the default Codex task. `task 1` / `任务 1`, `task 2` / `任务 2`, and later tasks are explicit task slots created only by `task N` or `任务 N` commands. The router handles exact English commands such as `list`, `tasks`, `progress`, `status`, `task N`, `task close N`, `task reset N`, `task alias N name`, `task name`, `task tmux clean`, `task snap`, and `task screenshot`, plus Chinese equivalents such as `列表`, `任务`, `进度`, `状态`, `任务 N`, `任务 关闭 N`, `任务 重置 N`, `任务 别名 N name`, `任务 name`, `任务 tmux 清理`, and `任务 截图`. It also accepts a small local command whitelist: `pwd` / `当前目录`, `ls` / `列文件`, and `ls` / `列文件` with one optional path or common flags such as `-la`. These control commands do not invoke an agent.
 
-Claude Code and opencode are separate from the numbered Codex task system. `claude N` and `opencode N` select or create independent tool slots, start a dedicated tmux session, and optionally send the rest of the message as a prompt. After selecting a tool slot, ordinary messages are forwarded to that tool until `tool off` / `工具退出`; `task N` continues to address Codex tasks. Tool watchers persist their tmux session, prompt, reply context, and choice state in `tool-tasks.json`, resume after a router restart, detect common numbered choice prompts, and send the final pane output back to the originating chat. `tool close claude N` or `tool close opencode N` stops a tool session.
+Claude Code and opencode are separate from the numbered Codex task system. `tool use claude N` and `tool use opencode N` select or create logical tool slots without starting a process. The first ordinary task sent after selection starts the dedicated tmux session. `tool off` / `工具退出` clears the selection and never falls back to Codex. If no agent is selected, ordinary text and attachments are held until the user chooses one. If the selected agent is missing, the task is blocked without fallback or loss; use `tool doctor` to inspect the host. Tool watchers persist their tmux session, prompt, reply context, and choice state in `tool-tasks.json`, resume after a router restart, detect common numbered choice prompts, and send the final pane output back to the originating chat. The legacy forms `claude N [prompt]` and `opencode N [prompt]` remain supported.
 
 ## Local Task Monitor
 

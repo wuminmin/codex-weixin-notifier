@@ -12,7 +12,9 @@ const DEFAULT_WATCH_POLL_MS = 1000;
 const DEFAULT_READY_TIMEOUT_MS = 20000;
 const DEFAULT_RESPONSE_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_CAPTURE_LINES = 160;
-const LABELS = { claude: "Claude Code", opencode: "opencode" };
+const LABELS = { codex: "Codex", claude: "Claude Code", opencode: "opencode" };
+const RUNNERS = new Set(["codex", "claude", "opencode"]);
+const MAX_PENDING_REQUESTS = 8;
 
 function expandHome(value) {
   const text = String(value || "");
@@ -106,7 +108,7 @@ function loadCurrent(config) {
 }
 
 function saveCurrent(config, current) {
-  writeJson(currentPath(config), { users: current.users || {}, updatedAt: now() });
+  writeJson(currentPath(config), { version: 2, users: current.users || {}, updatedAt: now() });
 }
 
 function userKey(fromUser) {
@@ -119,15 +121,136 @@ function currentTask(config, fromUser) {
   return loadState(config).tasks[key] || null;
 }
 
+function currentUserState(config, fromUser) {
+  return loadCurrent(config).users[userKey(fromUser)] || {};
+}
+
+export function selectedRunner(config, fromUser) {
+  const current = currentUserState(config, fromUser);
+  if (RUNNERS.has(current.selectedRunner)) return current.selectedRunner;
+  const task = currentTask(config, fromUser);
+  return task && RUNNERS.has(task.runner) ? task.runner : "";
+}
+
+export function setSelectedRunner(config, fromUser, runner, task = null) {
+  const selected = RUNNERS.has(runner) ? runner : "";
+  const current = loadCurrent(config);
+  const key = userKey(fromUser);
+  const previous = current.users[key] || {};
+  current.users[key] = {
+    ...previous,
+    selectedRunner: selected,
+    active: selected === "codex" ? "" : (task?.key || (previous.selectedRunner === selected ? previous.active || "" : "")),
+    updatedAt: now(),
+  };
+  saveCurrent(config, current);
+  return selected;
+}
+
+function clearSelectedRunner(config, fromUser) {
+  setSelectedRunner(config, fromUser, "");
+}
+
+function pendingRequests(config, fromUser) {
+  const current = currentUserState(config, fromUser);
+  return Array.isArray(current.pending) ? current.pending : [];
+}
+
+export function queuePending(config, fromUser, request) {
+  const current = loadCurrent(config);
+  const key = userKey(fromUser);
+  const previous = current.users[key] || {};
+  const pending = [...pendingRequests(config, fromUser), {
+    text: String(request?.text || ""),
+    attachments: Array.isArray(request?.attachments) ? request.attachments : [],
+    createdAt: now(),
+  }].slice(-MAX_PENDING_REQUESTS);
+  current.users[key] = { ...previous, pending, updatedAt: now() };
+  saveCurrent(config, current);
+  return pending.length;
+}
+
+export function pendingCount(config, fromUser) {
+  return pendingRequests(config, fromUser).length;
+}
+
+export function takePending(config, fromUser) {
+  const current = loadCurrent(config);
+  const key = userKey(fromUser);
+  const pending = pendingRequests(config, fromUser);
+  if (pending.length === 0) return [];
+  current.users[key] = { ...(current.users[key] || {}), pending: [], updatedAt: now() };
+  saveCurrent(config, current);
+  return pending;
+}
+
 function setCurrent(config, fromUser, task) {
   const current = loadCurrent(config);
-  current.users[userKey(fromUser)] = { active: task ? task.key : "", updatedAt: now() };
+  const key = userKey(fromUser);
+  const previous = current.users[key] || {};
+  current.users[key] = {
+    ...previous,
+    active: task ? task.key : "",
+    selectedRunner: task?.runner || previous.selectedRunner || "",
+    updatedAt: now(),
+  };
   saveCurrent(config, current);
 }
 
+function shellQuote(value) {
+  return "'" + String(value || "").replace(/'/gu, "'\\''") + "'";
+}
+
+function commandPath(runner, config) {
+  if (runner === "codex") return String(config?.codexCommand || process.env.CODEX_WEIXIN_CODEX_COMMAND || "codex");
+  if (runner === "claude") return String(config?.claudeCommand || process.env.CODEX_WEIXIN_CLAUDE_COMMAND || "claude");
+  return String(config?.opencodeCommand || process.env.CODEX_WEIXIN_OPENCODE_COMMAND || "opencode");
+}
+
+function resolveCommand(command) {
+  const value = String(command || "").trim();
+  if (!value) return "";
+  if (value.includes("/")) {
+    const resolved = expandHome(value);
+    try {
+      fs.accessSync(resolved, fs.constants.X_OK);
+      return resolved;
+    } catch {
+      return "";
+    }
+  }
+  const result = spawnSync("sh", ["-lc", "command -v " + shellQuote(value)], { encoding: "utf8" });
+  return result.status === 0 ? String(result.stdout || "").trim().split(/\r?\n/u)[0] : "";
+}
+
 function commandExists(command) {
-  const result = spawnSync("sh", ["-lc", `command -v ${command.replace(/[^A-Za-z0-9_.-]/gu, "")}`], { stdio: "ignore" });
-  return result.status === 0;
+  return Boolean(resolveCommand(command));
+}
+
+function runnerReadiness(config, runner) {
+  const command = commandPath(runner, config);
+  const resolved = resolveCommand(command);
+  return {
+    runner,
+    label: runnerLabel(runner),
+    command,
+    resolved,
+    installed: Boolean(resolved),
+  };
+}
+
+export function toolDoctor(config) {
+  const runners = ["codex", "claude", "opencode"].map((runner) => runnerReadiness(config, runner));
+  const tmux = resolveCommand("tmux");
+  return [
+    "Agent readiness:",
+    "",
+    ...runners.map((item) => item.label + ": " + (item.installed ? "ready " + item.resolved : "missing (checked " + item.command + ")")),
+    "tmux: " + (tmux ? "ready " + tmux : "missing"),
+    "Router: ready",
+    "",
+    "Control commands remain available even when agents are missing.",
+  ].join("\n");
 }
 
 function tmuxHasSession(name) {
@@ -218,6 +341,7 @@ function createTask(config, runner, target) {
     cwd: toolCwd(config),
     status: "ready",
     prompt: "",
+    pendingInstructions: [],
     summary: "",
     tmuxSession: "",
     activeReplyContext: null,
@@ -407,7 +531,11 @@ function startWatcher(task, config, deps, options = {}) {
 
 function ensureSession(task, config) {
   if (task.tmuxSession && tmuxHasSession(task.tmuxSession)) return task.tmuxSession;
-  if (!commandExists("tmux")) throw new Error("tmux 未安装，无法启动工具交互会话。");
+  const readiness = runnerReadiness(config, task.runner);
+  if (!readiness.installed) {
+    throw new Error(`${readiness.label} is not installed on the router host. Checked: ${readiness.command}. Run tool doctor.`);
+  }
+  if (!commandExists("tmux")) throw new Error("tmux is not installed on the router host. Run tool doctor.");
   const sessionName = tmuxName(task, config);
   if (tmuxHasSession(sessionName)) return sessionName;
   const { command, args } = toolCommand(task.runner, task, config);
@@ -444,8 +572,21 @@ function sendInstruction(task, text, config, fromUser, attachments, options, dep
     });
     return taskReply(task, "已发送", prompt);
   } catch (error) {
-    updateTask(config, task.key, (current) => ({ ...current, status: "failed", error: error.message, updatedAt: now() }));
-    return taskReply(task, "启动失败", error.message);
+    const blocked = /not installed|Run tool doctor/iu.test(error.message);
+    updateTask(config, task.key, (current) => ({
+      ...current,
+      status: blocked ? "blocked" : "failed",
+      error: error.message,
+      pendingInstructions: blocked
+        ? [...(Array.isArray(current.pendingInstructions) ? current.pendingInstructions : []), {
+          text: String(text || ""),
+          attachments,
+          createdAt: now(),
+        }].slice(-MAX_PENDING_REQUESTS)
+        : current.pendingInstructions || [],
+      updatedAt: now(),
+    }));
+    return taskReply(task, blocked ? "已阻断" : "启动失败", `${error.message}\n任务未执行，也未自动切换到其他 agent。`);
   }
 }
 
@@ -493,40 +634,90 @@ export function parseToolCommand(text) {
   }
   if (/^(?:工具列表|tool\s+list)$/iu.test(trimmed)) return { type: "list" };
   if (/^(?:工具退出|tool\s+(?:off|退出|返回))$/iu.test(trimmed)) return { type: "off" };
-  const tool = trimmed.match(/^tool\s+(.+)$/iu);
+  if (/^(?:工具诊断|tool\s+doctor)$/iu.test(trimmed)) return { type: "doctor" };
+  const tool = trimmed.match(/^(?:tool|工具)\s+(.+)$/iu);
   if (!tool) return null;
   const rest = tool[1].trim();
   if (/^(?:off|退出|返回)$/iu.test(rest)) return { type: "off" };
   if (/^(?:list|列表)$/iu.test(rest)) return { type: "list" };
+  if (/^(?:doctor|诊断)$/iu.test(rest)) return { type: "doctor" };
+  const use = rest.match(/^(?:use|使用)\s+(codex|claude|opencode)(?:\s+(\S+))?$/iu);
+  if (use) return { type: "select", runner: use[1].toLowerCase(), target: use[2] || "", text: "", deferred: true };
   const close = rest.match(/^(?:close|关闭)\s+(claude|opencode)\s+(\S+)$/iu);
   if (close) return { type: "close", runner: close[1].toLowerCase(), target: close[2] };
   return null;
 }
 
 export function hasSelectedTool(config, fromUser) {
-  return Boolean(currentTask(config, fromUser));
+  const runner = selectedRunner(config, fromUser);
+  return (runner === "claude" || runner === "opencode") && Boolean(currentTask(config, fromUser));
+}
+
+function latestTask(config, runner) {
+  return Object.values(loadState(config).tasks)
+    .filter((task) => task.runner === runner && task.status !== "closed")
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))[0] || null;
+}
+
+function selectionReply(config, fromUser) {
+  const runner = selectedRunner(config, fromUser);
+  if (!runner) {
+    return [
+      "Current agent: none",
+      "",
+      "Choose a coding agent before sending a task:",
+      "tool use codex",
+      "tool use claude",
+      "tool use opencode",
+      "",
+      "Run tool doctor to inspect the local environment.",
+    ].join("\n");
+  }
+  const readiness = runnerReadiness(config, runner);
+  const task = currentTask(config, fromUser);
+  return [
+    `Current agent: ${runnerLabel(runner)}`,
+    `Runtime: ${readiness.installed ? `ready ${readiness.resolved}` : `not installed (checked ${readiness.command})`}`,
+    task ? `Logical session: ${runner} ${task.id} · ${task.status || "ready"}` : null,
+    "",
+    readiness.installed
+      ? "Send a task to start or resume this agent."
+      : "Control commands remain available. Run tool doctor or install the selected agent before sending a task.",
+  ].filter(Boolean).join("\n");
 }
 
 export function toolList(config, fromUser) {
   const state = loadState(config);
   const selected = currentTask(config, fromUser)?.key;
   const tasks = Object.values(state.tasks).sort((a, b) => a.runner.localeCompare(b.runner) || Number(a.id) - Number(b.id));
-  if (tasks.length === 0) return "tool: 暂无 Claude Code/opencode 会话。\n用 claude 1 或 opencode 1 创建。";
-  return ["tool 会话:", ...tasks.map((task) => [
+  const readiness = ["codex", "claude", "opencode"].map((runner) => {
+    const item = runnerReadiness(config, runner);
+    return `${item.label}: ${item.installed ? "ready" : "missing"}`;
+  });
+  return [
+    `Current agent: ${selectedRunner(config, fromUser) || "none"}`,
+    `Readiness: ${readiness.join(" · ")}`,
+    "",
+    "Logical sessions:",
+    tasks.length > 0 ? tasks.map((task) => [
     `${task.runner} ${task.id}${task.key === selected ? " · current" : ""}`,
     `状态: ${task.status || "ready"}`,
     `目录: ${task.cwd}`,
     `tmux: ${task.tmuxSession || "未启动"}`,
     task.toolSessionId ? `session: ${task.toolSessionId}` : null,
-  ].filter(Boolean).join(" | "))].join("\n");
+    ].filter(Boolean).join(" | ")) : "none",
+    "",
+    "Choose: tool use codex | tool use claude | tool use opencode",
+  ].join("\n");
 }
 
 export async function handleToolCommand(command, fromUser, config, options = {}, deps = {}) {
   if (!command) return null;
   if (command.type === "off") {
-    setCurrent(config, fromUser, null);
-    return "tool: 已退出工具会话，后续消息回到 Codex task。";
+    clearSelectedRunner(config, fromUser);
+    return selectionReply(config, fromUser);
   }
+  if (command.type === "doctor") return toolDoctor(config);
   if (command.type === "list") return toolList(config, fromUser);
   if (command.type === "close") {
     const task = findTask(config, command.runner, command.target);
@@ -535,15 +726,22 @@ export async function handleToolCommand(command, fromUser, config, options = {},
     stopWatcher(config, task);
     try { killTmux(task.tmuxSession); } catch (error) { return taskReply(task, "关闭失败", error.message); }
     updateTask(config, task.key, (current) => ({ ...current, status: "closed", tmuxSession: "", interactiveWatch: null, updatedAt: now() }));
-    if (currentTask(config, fromUser)?.key === task.key) setCurrent(config, fromUser, null);
+    if (currentTask(config, fromUser)?.key === task.key) clearSelectedRunner(config, fromUser);
     return taskReply(task, "已关闭");
   }
   if (command.type !== "select") return null;
+  if (command.runner === "codex") {
+    setSelectedRunner(config, fromUser, "codex");
+    return selectionReply(config, fromUser);
+  }
   let task = findTask(config, command.runner, command.target);
+  if (!task) task = latestTask(config, command.runner);
   if (!task) task = createTask(config, command.runner, command.target);
   if (!task) return `tool ${command.runner} ${command.target}: 只能按顺序创建下一个数字会话。`;
   if (task.status === "closed") task = updateTask(config, task.key, (current) => ({ ...current, status: "ready", error: "", updatedAt: now() })) || task;
   setCurrent(config, fromUser, task);
+  setSelectedRunner(config, fromUser, command.runner, task);
+  if (command.deferred) return selectionReply(config, fromUser);
   if (!command.text) {
     if (config.dryRun) return taskReply(task, "将启动");
     try {
@@ -602,4 +800,5 @@ export function resumeToolWatchers(config, args = {}, deps = {}) {
 export const toolRouterForTests = {
   parseToolCommand,
   toolList,
+  toolDoctor,
 };

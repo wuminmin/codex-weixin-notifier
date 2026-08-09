@@ -87,11 +87,32 @@ test("chat help and onboard commands describe the current Lark bot", async () =>
   config.configPath = path.join(home, ".codex", "codex-notifier.json");
   await withRuntimeConfig(config, async () => {
     const help = await taskCoreForTests.handleText("help", "oc_chat", config);
-    assert.match(help, /Lark 国际版/u);
+    assert.match(help, /Coding Agent Task Monitor/u);
     assert.match(help, /list/u);
-    assert.match(help, /node scripts\/onboard\.mjs/u);
+    assert.match(help, /tool use codex/u);
     const onboard = await taskCoreForTests.handleText("onboard", "oc_chat", config);
     assert.match(onboard, /--channel feishu --platform lark/u);
+    assert.match(onboard, /catm/u);
     assert.match(onboard, /global/u);
+  });
+});
+
+test("ordinary messages wait for an explicit agent selection and replay once", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-notifier-selection-"));
+  const config = runtime(home, "global", "main");
+  await withRuntimeConfig(config, async () => {
+    const waiting = await taskCoreForTests.handleText("inspect the repository", "oc_chat", config);
+    assert.match(waiting, /No coding agent selected/u);
+    assert.match(waiting, /tool use codex/u);
+
+    const selected = await taskCoreForTests.handleText("tool use codex", "oc_chat", config);
+    assert.match(selected, /Current agent: Codex/u);
+    assert.match(selected, /Replayed pending request/u);
+    assert.match(selected, /inspect the repository/u);
+
+    const off = await taskCoreForTests.handleText("tool off", "oc_chat", config);
+    assert.match(off, /Current agent: none/u);
+    const blockedAgain = await taskCoreForTests.handleText("continue", "oc_chat", config);
+    assert.match(blockedAgain, /No coding agent selected/u);
   });
 });
