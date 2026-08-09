@@ -452,6 +452,128 @@ function relativeTime(value) {
   return `${formatDuration(Date.now() - millis)}前`;
 }
 
+const DEFAULT_ACTIVITY_LIMIT = Number(process.env.CODEX_WEIXIN_RECENT_ACTIVITY_LIMIT) || 5;
+
+function summarizeExecCall(rawArgs) {
+  if (!rawArgs) return "";
+  const text = String(rawArgs);
+  const cmdMatch = text.match(/cmd\s*:\s*(['"])(.*?)\1/u);
+  if (cmdMatch) return `命令：${compact(cmdMatch[2], 80)}`;
+  if (/\*\*\* (?:Begin Patch|Update File|Add File|Delete File)/iu.test(text)) {
+    const fileMatch = text.match(/\*\*\* (?:Update|Add|Delete) File:\s*([^\n\r\\]+)/u);
+    if (fileMatch) return `修改：${compact(fileMatch[1], 80)}`;
+    return "修改文件";
+  }
+  return "";
+}
+
+function parseTargetFromArgs(rawArgs) {
+  if (!rawArgs) return "";
+  const text = typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs);
+  try {
+    const parsed = JSON.parse(text);
+    return firstString(parsed.target, parsed.agent, parsed.name);
+  } catch {
+    return "";
+  }
+}
+
+function parsePatchFiles(rawRes) {
+  let parsed;
+  try {
+    parsed = JSON.parse(rawRes);
+  } catch {
+    return "";
+  }
+  const stdout = String(parsed.stdout || parsed.output || "");
+  const files = stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => /^[MAD]\s+\S/u.test(line))
+    .map((line) => line.replace(/^[MAD]\s+/u, "").trim());
+  if (files.length === 0) return "";
+  return compact(files.join(", "), 80);
+}
+
+function parseActivityEvent(line) {
+  let entry;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const payload = entry.payload || {};
+  const ts = timestampMs(entry.timestamp);
+  if (entry.type === "event_msg") {
+    if (payload.type === "user_message") {
+      const msg = compact(payload.message, 100);
+      return msg ? { ts, label: "我", text: msg } : null;
+    }
+    if (payload.type === "agent_message") {
+      const msg = compact(payload.message, 200);
+      return msg ? { ts, label: "助手", text: msg } : null;
+    }
+    if (payload.type === "context_compacted") return { ts, label: "系统", text: "上下文已压缩" };
+    if (payload.type === "patch_apply_end") {
+      const files = parsePatchFiles(payload.res);
+      return { ts, label: "修改", text: files || "应用补丁" };
+    }
+    if (payload.type === "task_started") return { ts, label: "系统", text: "任务开始" };
+    if (payload.type === "task_complete") return { ts, label: "系统", text: "本轮完成" };
+    return null;
+  }
+  if (entry.type === "response_item") {
+    if (payload.type === "custom_tool_call" && payload.name === "exec") {
+      const summary = summarizeExecCall(payload.arguments);
+      return summary ? { ts, label: "工具", text: summary } : null;
+    }
+    if (payload.type === "function_call"
+      && (payload.name === "send_message" || payload.name === "followup_task")) {
+      const target = parseTargetFromArgs(payload.arguments);
+      if (target) return { ts, label: "子任务", text: `${target} 更新` };
+    }
+  }
+  return null;
+}
+
+function formatRecentActivity(view, limit = DEFAULT_ACTIVITY_LIMIT) {
+  if (!view.transcriptPath) return "";
+  let stat;
+  try {
+    stat = fs.statSync(view.transcriptPath);
+  } catch {
+    return "";
+  }
+  const text = readTranscriptTail(view.transcriptPath, stat.size);
+  const events = [];
+  for (const line of text.split(/\r?\n/u)) {
+    const event = parseActivityEvent(line);
+    if (event) events.push(event);
+  }
+  if (events.length === 0) return "";
+  const recent = events.slice(-Math.max(1, limit));
+  const body = recent
+    .map((event) => `  · [${event.label}] ${compact(event.text, 100)}`)
+    .join("\n");
+  return `最近活动：\n${body}`;
+}
+
+function isFreshActive(view) {
+  if (!ACTIVE_STATUSES.has(view.status)) return false;
+  return Date.now() - timestampMs(view.updatedAt) <= STALE_ACTIVE_MS;
+}
+
+function startOfTodayMs() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+}
+
+function endedToday(view) {
+  if (ACTIVE_STATUSES.has(view.status)) return false;
+  const completed = timestampMs(view.completedAt || view.updatedAt);
+  return completed >= startOfTodayMs();
+}
+
 function currentTaskId(fromUser = "") {
   const current = readJson(CURRENT_TASK_PATH, { users: {} });
   if (fromUser && current.users?.[fromUser]?.currentTask !== undefined) {
@@ -479,6 +601,10 @@ function formatViewBlock(view, options = {}) {
   }
   if (view.prompt && view.stage !== view.prompt) lines.push(`任务：${compact(view.prompt, 100)}`);
   lines.push(`更新：${relativeTime(view.updatedAt)}`);
+  if (ACTIVE_STATUSES.has(view.status)) {
+    const activity = formatRecentActivity(view);
+    if (activity) lines.push(activity);
+  }
   if (ACTIVE_STATUSES.has(view.status) && Date.now() - timestampMs(view.updatedAt) > STALE_ACTIVE_MS) {
     lines.push("提示：长时间没有事件，可能已失联");
   }
@@ -488,9 +614,9 @@ function formatViewBlock(view, options = {}) {
 export function formatTaskOverview(fromUser = "") {
   const { routerTasks, localSessions } = allTaskViews();
   const currentTask = currentTaskId(fromUser);
-  const recentCompleted = localSessions.filter((session) => !ACTIVE_STATUSES.has(session.status)).slice(0, 5);
-  const activeLocal = localSessions.filter((session) => ACTIVE_STATUSES.has(session.status));
-  const visible = [...routerTasks, ...activeLocal, ...recentCompleted];
+  const completedToday = localSessions.filter((session) => endedToday(session));
+  const activeLocal = localSessions.filter((session) => isFreshActive(session));
+  const visible = [...routerTasks, ...activeLocal, ...completedToday];
   const activeCount = visible.filter((view) => ACTIVE_STATUSES.has(view.status)).length;
   const header = [
     `任务概览 · ${visible.length} 个（活动 ${activeCount}）`,
@@ -503,14 +629,26 @@ export function formatTaskOverview(fromUser = "") {
 export function formatTaskProgress(fromUser = "") {
   const { routerTasks, localSessions } = allTaskViews();
   const currentTask = currentTaskId(fromUser);
-  const active = [...routerTasks, ...localSessions]
-    .filter((view) => ACTIVE_STATUSES.has(view.status))
+  const allViews = [...routerTasks, ...localSessions];
+  const active = allViews
+    .filter((view) => isFreshActive(view))
     .sort((left, right) => timestampMs(right.updatedAt) - timestampMs(left.updatedAt));
-  if (active.length === 0) return "任务进度 · 当前没有正在执行或等待确认的任务";
-  return [
-    `任务进度 · 活动 ${active.length} 个`,
-    active.map((view) => formatViewBlock(view, { currentTask })).join("\n\n"),
-  ].join("\n\n");
+  const completedToday = allViews
+    .filter((view) => endedToday(view))
+    .sort((left, right) => timestampMs(right.completedAt || right.updatedAt)
+      - timestampMs(left.completedAt || left.updatedAt));
+  if (active.length === 0 && completedToday.length === 0) {
+    return "任务进度 · 当前没有正在执行或当天结束的任务";
+  }
+  const parts = [`任务进度 · 活动 ${active.length} 个`];
+  if (active.length > 0) {
+    parts.push(active.map((view) => formatViewBlock(view, { currentTask })).join("\n\n"));
+  }
+  if (completedToday.length > 0) {
+    parts.push(`今日完成 ${completedToday.length} 个`);
+    parts.push(completedToday.map((view) => formatViewBlock(view, { currentTask })).join("\n\n"));
+  }
+  return parts.join("\n\n");
 }
 
 function processCounts() {
