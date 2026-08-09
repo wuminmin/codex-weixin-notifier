@@ -8,7 +8,6 @@ import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { fileURLToPath } from "node:url";
-import { renderMarkdownImages, terminalSnapshotMarkdown } from "./markdown-image-renderer.mjs";
 import {
   HELP_TOPICS,
   allCommandLines,
@@ -88,9 +87,6 @@ const DEFAULT_INTERACTIVE_READY_TIMEOUT_MS = 20000;
 const DEFAULT_INTERACTIVE_RESPONSE_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_INTERACTIVE_RESPONSE_POLL_MS = 1000;
 const DEFAULT_INTERACTIVE_WATCH_STATUS_INTERVAL_MS = 30 * 60 * 1000;
-const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
-const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
-const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 30000;
 let fallbackRuntimeConfig = {};
 const runtimeContext = new AsyncLocalStorage();
 const interactiveWatchers = new Map();
@@ -299,38 +295,6 @@ function isDryRun(args, config) {
 function isFalseyConfig(value) {
   if (value === false) return true;
   return /^(?:0|false|no|off)$/iu.test(String(value || "").trim());
-}
-
-function markdownImageRepliesEnabled(config) {
-  if (config.channel === "feishu") return false;
-  if (process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES !== undefined) {
-    return !isFalseyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
-  }
-  if (config.renderMarkdownImages !== undefined && config.renderMarkdownImages !== null && config.renderMarkdownImages !== "") {
-    return !isFalseyConfig(config.renderMarkdownImages);
-  }
-  return true;
-}
-
-function markdownImageNumber(value, fallback) {
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
-}
-
-function markdownImageOptions(config, title = "Codex Weixin") {
-  return {
-    title,
-    chromePath: valueFrom(config.chromePath, process.env.CODEX_WEIXIN_CHROME_PATH, ""),
-    width: markdownImageNumber(valueFrom(config.markdownImageWidth, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH), DEFAULT_MARKDOWN_IMAGE_WIDTH),
-    maxChars: markdownImageNumber(valueFrom(config.markdownImageMaxChars, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS), DEFAULT_MARKDOWN_IMAGE_MAX_CHARS),
-    maxHeight: markdownImageNumber(valueFrom(config.markdownImageMaxHeight, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT), DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT),
-  };
-}
-
-function canSendMarkdownImage(config, args = {}) {
-  if (!markdownImageRepliesEnabled(config)) return false;
-  if (isDryRun(args, config)) return true;
-  return !valueFrom(config.endpoint, process.env.WEIXIN_ILINK_ENDPOINT);
 }
 
 function taskWorkspaceRoot(config = currentRuntimeConfig()) {
@@ -981,6 +945,14 @@ function taskStatusText(status) {
   return status || "未知";
 }
 
+function normalizeTextReply(text) {
+  const lines = String(text || "")
+    .replace(/\r\n?/gu, "\n")
+    .split("\n")
+    .map((line) => /^(?:\s*[-*_]){3,}\s*$/u.test(line) ? "────────────────" : line.trimEnd());
+  return lines.join("\n").replace(/\n{3,}/gu, "\n\n").trim();
+}
+
 function extractText(message) {
   if (typeof message === "string") return message.trim();
   for (const item of messageItems(message)) {
@@ -1057,12 +1029,13 @@ async function getUpdates(config, syncBuf) {
 }
 
 async function sendText(text, config, args = {}) {
+  const message = normalizeTextReply(text);
   if (config.channel === "feishu") {
-    await sendFeishuMarkdown(text, config, { dryRun: isDryRun(args, config) });
+    await sendFeishuMarkdown(message, config, { dryRun: isDryRun(args, config) });
     return;
   }
   if (isDryRun(args, config)) {
-    process.stdout.write(`${text}\n`);
+    process.stdout.write(`${message}\n`);
     return;
   }
 
@@ -1074,7 +1047,7 @@ async function sendText(text, config, args = {}) {
       to_user: valueFrom(config.toUser, process.env.WEIXIN_TO_USER),
       to_chat: valueFrom(config.toChat, process.env.WEIXIN_TO_CHAT),
       msg_type: "text",
-      text: { content: text },
+      text: { content: message },
     };
     for (const key of Object.keys(body)) {
       if (body[key] === undefined || body[key] === null || body[key] === "") delete body[key];
@@ -1112,7 +1085,7 @@ async function sendText(text, config, args = {}) {
         client_id: `codex-command-${Date.now()}-${crypto.randomBytes(2).toString("hex")}`,
         message_type: MESSAGE_TYPE_BOT,
         message_state: MESSAGE_STATE_FINISH,
-        item_list: [{ type: MESSAGE_ITEM_TEXT, text_item: { text } }],
+        item_list: [{ type: MESSAGE_ITEM_TEXT, text_item: { text: message } }],
         context_token: contextToken,
       },
       base_info: {
@@ -1310,28 +1283,9 @@ function extractMediaDirectives(text) {
   return { text: kept.join("\n").trim(), media };
 }
 
-async function sendMarkdownImageReply(text, config, args = {}) {
-  if (!String(text || "").trim()) return false;
-  if (!canSendMarkdownImage(config, args)) return false;
-  try {
-    const rendered = await renderMarkdownImages(text, markdownImageOptions(config));
-    for (const filePath of rendered.filePaths) await sendMediaFile(filePath, config, args);
-    return true;
-  } catch (error) {
-    appendTextFile(
-      path.join(logDir(config), "markdown-image-errors.log"),
-      `[${new Date().toISOString()}] ${error.stack || error.message}\n`,
-    );
-    return false;
-  }
-}
-
 async function sendTextWithMedia(text, config, args = {}) {
   const parsed = extractMediaDirectives(text);
-  if (parsed.text) {
-    const sentImage = await sendMarkdownImageReply(parsed.text, config, args);
-    if (!sentImage) await sendText(parsed.text, config, args);
-  }
+  if (parsed.text) await sendText(parsed.text, config, args);
   for (const filePath of parsed.media) {
     try {
       await sendMediaFile(filePath, config, args);
@@ -1771,40 +1725,30 @@ function currentInteractiveQuestion(sessionName, config) {
 }
 
 async function taskSnapshotResponse(task, config) {
-  if (!task) return "当前没有可截图的 task。";
+  if (!task) return "当前没有可查看的 task。";
   const refreshed = refreshTaskLiveness(task) || task;
   const sessionName = refreshed.tmuxSession || makeTmuxSessionName(refreshed);
   if (!sessionName || !tmuxHasSession(sessionName)) {
     return [
-      taskHeader(refreshed.id, "没有可截图的 tmux 会话"),
+      taskHeader(refreshed.id, "没有可查看的 tmux 会话"),
       "先发送一条普通消息启动该 task，或切换到正在运行的 task。",
     ].join("\n");
   }
 
-  let pane = "";
   try {
-    pane = stripAnsi(captureTmuxPane(sessionName, config));
-    const markdown = terminalSnapshotMarkdown({
-      taskId: refreshed.id,
-      sessionName,
-      paneText: pane,
-    });
-    const rendered = await renderMarkdownImages(
-      markdown,
-      markdownImageOptions(config, `task ${refreshed.id} tmux`),
-    );
-    return rendered.filePaths.map((filePath) => `MEDIA:${filePath}`).join("\n");
-  } catch (error) {
-    appendTextFile(
-      path.join(logDir(config), "markdown-image-errors.log"),
-      `[${new Date().toISOString()}] task snap ${sessionName}: ${error.stack || error.message}\n`,
-    );
+    const pane = stripAnsi(captureTmuxPane(sessionName, config));
     return [
-      taskHeader(refreshed.id, "截图失败，改发文字"),
+      taskHeader(refreshed.id, "当前输出"),
+      `会话: ${sessionName}`,
+      "────────────────",
+      compactLines(pane || "(暂无可抓取输出)", 5000),
+    ].join("\n");
+  } catch (error) {
+    return [
+      taskHeader(refreshed.id, "读取输出失败"),
       `会话: ${sessionName}`,
       `错误: ${error.message}`,
       "",
-      compactLines(pane || "(暂无可抓取输出)", 3000),
     ].join("\n");
   }
 }
@@ -3341,7 +3285,7 @@ function inboundHeartbeatText(text, fromUser, attachments = []) {
 
   const command = parseCommand(text);
   if (command.type === "message") return taskHeader(task.id, "处理中");
-  if (command.type === "snapshot") return taskHeader(task.id, "截图中");
+  if (command.type === "snapshot") return taskHeader(task.id, "查看中");
   return "";
 }
 

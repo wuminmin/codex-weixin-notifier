@@ -3,7 +3,7 @@
   "defaults": {
     "codexCwd": "~",
     "runner": "interactive",
-    "renderMarkdownImages": true,
+    "renderMarkdownImages": false,
     "maxMediaBytes": 20971520
   },
   "channels": {

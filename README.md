@@ -114,7 +114,7 @@ The old config is read in place as `weixin/default/default`; credentials and sta
   "defaults": {
     "codexCwd": "~",
     "runner": "interactive",
-    "renderMarkdownImages": true
+    "renderMarkdownImages": false
   },
   "channels": {
     "feishu": {
@@ -206,7 +206,7 @@ node scripts/notify.mjs \
   --task "Deploy complete"
 ```
 
-`--target` accepts the target `id` or `chatId`. Feishu notification targets use `chatId` for either a group or a direct-message conversation. Feishu replies use native rich text/Markdown and SDK chunking; Weixin continues to render Markdown as long images by default. `task snap` remains a PNG on both channels.
+`--target` accepts the target `id` or `chatId`. Feishu notification targets use `chatId` for either a group or a direct-message conversation. Feishu replies use native rich text/Markdown and SDK chunking; Weixin replies are plain text with preserved line breaks and separators. `task snap` returns a text pane dump when used for legacy diagnostics.
 
 The independent tool completion poller watches `claude` and `opencode` session views every 60 seconds by default and fans out only a persisted `running → completed` transition. Configure it with `CODEX_TOOL_NOTIFIER_INTERVAL_MS`, `CODEX_TOOL_NOTIFIER_SOURCES=claude,opencode`, and `CODEX_TOOL_NOTIFIER_DRY_RUN=1`. Records inactive for seven days are removed automatically; restarting the router does not re-send a session already marked as notified.
 
@@ -487,11 +487,11 @@ codex --no-alt-screen \
   -C "${CODEX_WEIXIN_CODEX_CWD:-$HOME}"
 ```
 
-When the router receives an ordinary task message, it sends one small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and starts a background watcher. That heartbeat is the only dispatch acknowledgement: the router does not send a second long-image `interactive 已发送 / 已进入后台等待` reply. The watcher keeps the router free for other Weixin commands, sends choice prompts immediately, and sends the final rendered image after Codex prints `Worked` or returns to the input prompt. It maps `plan ...` / `计划 ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, `goal clear`, plus `目标 ...`, `目标 状态`, `目标 暂停`, `目标 继续`, and `目标 清除`, to the native `/goal` slash command family.
+When the router receives an ordinary task message, it sends one small text heartbeat such as `task 2 · 处理中`, then sends the message into the task tmux session and starts a background watcher. That heartbeat is the only dispatch acknowledgement: the router does not send a second `interactive 已发送 / 已进入后台等待` reply. The watcher keeps the router free for other Weixin commands, sends choice prompts immediately, and sends the final result as plain text after Codex prints `Worked` or returns to the input prompt. It maps `plan ...` / `计划 ...` to Codex CLI `/plan ...`, and maps `goal ...`, `goal status`, `goal pause`, `goal resume`, `goal clear`, plus `目标 ...`, `目标 状态`, `目标 暂停`, `目标 继续`, and `目标 清除`, to the native `/goal` slash command family.
 
 When Codex enters an interactive `Question 1/1` choice prompt, the router formats the full question text and numbered options for Weixin, including wrapped prompt and option lines from the terminal. Reply with the option number, such as `1` or `2`, and the router submits that choice in the task tmux session.
 
-Send `task snap`, `task screenshot`, `任务 截图`, or `截图` to render the current task's tmux pane as one or more terminal-style PNG images and send them back to Weixin. This is a static snapshot; continue to control Codex by sending normal text replies.
+Send `task snap`, `task screenshot`, `任务 截图`, or `截图` to return the current task's tmux pane as formatted plain text. This is a static output dump; continue to control Codex by sending normal text replies.
 
 Task ids are monotonic and are never deleted or reused. If the next id is `3`, `task 3` may create a task slot and data directory, but `task 5` is rejected until `task 3` and `task 4` exist. `task 0` is protected and cannot be closed.
 
@@ -599,11 +599,7 @@ Optional command-router config fields in `~/.codex/weixin-notifier.json`:
   "codexArgs": ["--json", "--skip-git-repo-check"],
   "interactiveResponseTimeoutMs": 21600000,
   "interactiveWatchStatusIntervalMs": 1800000,
-  "renderMarkdownImages": true,
-  "chromePath": "/usr/bin/google-chrome",
-  "markdownImageWidth": 920,
-  "markdownImageMaxChars": 120000,
-  "markdownImageMaxHeight": 30000
+  "renderMarkdownImages": false
 }
 ```
 
@@ -619,7 +615,7 @@ By default, task Codex sessions use `$HOME` as their working directory instead o
 
 For interactive replies, the router sends the heartbeat immediately, then tracks the tmux pane in the background until Codex shows a choice prompt, returns to an input prompt, or prints the final `Worked` status before rendering the Weixin image. Watcher state is stored in task metadata so a router restart with `--no-restart-tasks` can resume waiting for the same tmux task. `interactiveResponseTimeoutMs` is only an abnormal watcher timeout and defaults to 21600000 ms. Override it with `CODEX_WEIXIN_INTERACTIVE_RESPONSE_TIMEOUT_MS` or `"interactiveResponseTimeoutMs"`. Long-running tasks send a light status text every 1800000 ms by default; override with `CODEX_WEIXIN_INTERACTIVE_WATCH_STATUS_INTERVAL_MS` or `"interactiveWatchStatusIntervalMs"`, or set it to `0` to disable status pings.
 
-By default, normal text/Markdown replies and completion notifications are rendered as terminal-style long PNG images before being sent to Weixin. Set `renderMarkdownImages: false` or `CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES=0` to force text replies. Optional overrides: `chromePath` / `CODEX_WEIXIN_CHROME_PATH`, `markdownImageWidth` / `CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH`, `markdownImageMaxChars` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS`, and `markdownImageMaxHeight` / `CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT`. `markdownImageMaxHeight` is the per-image output PNG height and defaults to `30000` for long-image mode; content beyond that limit is sent as multiple images instead of being clipped. If rendering or image upload fails, the sender falls back to the original text reply.
+Weixin normal replies and completion notifications are sent as plain text. Line breaks are preserved, repeated blank lines are collapsed, and Markdown horizontal rules are converted to readable separators. Explicit `MEDIA:/absolute/path` directives and inbound attachments still use the media path.
 
 ## Weixin and Feishu Attachments
 

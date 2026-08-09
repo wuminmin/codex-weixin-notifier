@@ -16,9 +16,5 @@
   "codexBypassHookTrust": false,
   "interactiveResponseTimeoutMs": 21600000,
   "interactiveWatchStatusIntervalMs": 1800000,
-  "renderMarkdownImages": true,
-  "chromePath": "/usr/bin/google-chrome",
-  "markdownImageWidth": 920,
-  "markdownImageMaxChars": 120000,
-  "markdownImageMaxHeight": 30000
+  "renderMarkdownImages": false
 }

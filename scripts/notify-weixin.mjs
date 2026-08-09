@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { renderMarkdownImages } from "./markdown-image-renderer.mjs";
 import {
   listBotConfigs,
   loadNotifierConfig,
@@ -20,13 +19,6 @@ const ILINK_APP_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 6);
 const MESSAGE_TYPE_BOT = 2;
 const MESSAGE_STATE_FINISH = 2;
 const MESSAGE_ITEM_TEXT = 1;
-const MESSAGE_ITEM_IMAGE = 2;
-const MEDIA_TYPE_IMAGE = 1;
-const DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
-const DEFAULT_MARKDOWN_IMAGE_WIDTH = 920;
-const DEFAULT_MARKDOWN_IMAGE_MAX_CHARS = 120_000;
-const DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT = 30000;
-const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 
 function expandHome(value) {
   if (!value) return value;
@@ -80,36 +72,6 @@ async function readEventJson(args) {
 
 function valueFrom(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
-}
-
-function isFalseyConfig(value) {
-  if (value === false) return true;
-  return /^(?:0|false|no|off)$/iu.test(String(value || "").trim());
-}
-
-function markdownImageRepliesEnabled(config) {
-  if (process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES !== undefined) {
-    return !isFalseyConfig(process.env.CODEX_WEIXIN_RENDER_MARKDOWN_IMAGES);
-  }
-  if (config.renderMarkdownImages !== undefined && config.renderMarkdownImages !== null && config.renderMarkdownImages !== "") {
-    return !isFalseyConfig(config.renderMarkdownImages);
-  }
-  return true;
-}
-
-function positiveInteger(value, fallback) {
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
-}
-
-function markdownImageOptions(config, title = "Codex task completed") {
-  return {
-    title,
-    chromePath: valueFrom(config.chromePath, process.env.CODEX_WEIXIN_CHROME_PATH, ""),
-    width: positiveInteger(valueFrom(config.markdownImageWidth, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_WIDTH), DEFAULT_MARKDOWN_IMAGE_WIDTH),
-    maxChars: positiveInteger(valueFrom(config.markdownImageMaxChars, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_CHARS), DEFAULT_MARKDOWN_IMAGE_MAX_CHARS),
-    maxHeight: positiveInteger(valueFrom(config.markdownImageMaxHeight, process.env.CODEX_WEIXIN_MARKDOWN_IMAGE_MAX_HEIGHT), DEFAULT_MARKDOWN_IMAGE_MAX_HEIGHT),
-  };
 }
 
 function stableSessionId(event, args) {
@@ -178,6 +140,14 @@ function shouldShowWorkspace(event) {
   return !samePathValue(event.task, workspace);
 }
 
+function normalizeTextReply(text) {
+  const lines = String(text || "")
+    .replace(/\r\n?/gu, "\n")
+    .split("\n")
+    .map((line) => /^(?:\s*[-*_]){3,}\s*$/u.test(line) ? "────────────────" : line.trimEnd());
+  return lines.join("\n").replace(/\n{3,}/gu, "\n\n").trim();
+}
+
 export function formatMessage(event, config) {
   const maxSummaryLength = Number(config.maxSummaryLength || 800);
   const summary = event.summary.length > maxSummaryLength
@@ -186,6 +156,7 @@ export function formatMessage(event, config) {
 
   const lines = [
     config.title || "Codex task completed",
+    "────────────────",
     `Status: ${event.status}`,
     `Session: ${event.sessionId}`,
     `Source: ${event.source}`,
@@ -195,8 +166,8 @@ export function formatMessage(event, config) {
   if (shouldShowTask(event)) lines.push(`Task: ${event.task}`);
   if (event.startedAt) lines.push(`Started: ${event.startedAt}`);
   lines.push(`Finished: ${event.finishedAt}`);
-  if (summary) lines.push("", summary);
-  return lines.join("\n");
+  if (summary) lines.push("", "────────────────", summary);
+  return normalizeTextReply(lines.join("\n"));
 }
 
 function ensureTrailingSlash(url) {
@@ -265,43 +236,6 @@ function buildOfficialSendMessageRequest(message, event, config) {
   };
 }
 
-function buildOfficialMessageItemsRequest(items, event, config) {
-  const token = valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN);
-  const baseUrl = valueFrom(config.baseUrl, config.baseurl, process.env.WEIXIN_ILINK_BASE_URL, DEFAULT_ILINK_BASE_URL);
-  const toUser = valueFrom(config.toUser, config.userId, config.ilinkUserId, process.env.WEIXIN_TO_USER);
-  const contextToken = valueFrom(config.contextToken, process.env.WEIXIN_CONTEXT_TOKEN);
-  if (!token) {
-    throw new Error("Missing Weixin iLink token. Run pair-weixin.mjs or set config.token.");
-  }
-  if (!toUser) {
-    throw new Error("Missing Weixin recipient. Run bind-recipient.mjs or set config.toUser.");
-  }
-  if (!contextToken) {
-    throw new Error("Missing Weixin contextToken. Send a message to the paired bot, then run bind-recipient.mjs.");
-  }
-
-  const endpoint = new URL("ilink/bot/sendmessage", ensureTrailingSlash(baseUrl)).toString();
-  return {
-    endpoint,
-    headers: buildILinkHeaders(token, config.headers || {}),
-    body: {
-      msg: {
-        from_user_id: "",
-        to_user_id: toUser,
-        client_id: `codex-weixin-${event.sessionId}-${Date.now()}`,
-        message_type: MESSAGE_TYPE_BOT,
-        message_state: MESSAGE_STATE_FINISH,
-        item_list: items,
-        context_token: contextToken,
-      },
-      base_info: {
-        channel_version: "2.4.6",
-        bot_agent: "CodexWeixinNotifier/0.1.0",
-      },
-    },
-  };
-}
-
 function buildILinkRequest(message, config) {
   const endpoint = valueFrom(config.endpoint, process.env.WEIXIN_ILINK_ENDPOINT);
   if (!endpoint) {
@@ -364,164 +298,8 @@ async function postJson(endpoint, headers, body, timeoutMs) {
   }
 }
 
-function aesEcbPaddedSize(plaintextSize) {
-  return Math.ceil((plaintextSize + 1) / 16) * 16;
-}
-
-function encryptAesEcb(plaintext, key) {
-  const cipher = crypto.createCipheriv("aes-128-ecb", key, null);
-  return Buffer.concat([cipher.update(plaintext), cipher.final()]);
-}
-
-async function getUploadUrl({ filePath, toUser, mediaType, config, stat, aeskey, filekey }) {
-  const plaintext = fs.readFileSync(filePath);
-  const body = {
-    filekey,
-    media_type: mediaType,
-    to_user_id: toUser,
-    rawsize: stat.size,
-    rawfilemd5: crypto.createHash("md5").update(plaintext).digest("hex"),
-    filesize: aesEcbPaddedSize(stat.size),
-    no_need_thumb: true,
-    aeskey: aeskey.toString("hex"),
-    base_info: {
-      channel_version: "2.4.6",
-      bot_agent: "CodexWeixinNotifier/0.1.0",
-    },
-  };
-  const endpoint = new URL("ilink/bot/getuploadurl", ensureTrailingSlash(config.baseUrl || DEFAULT_ILINK_BASE_URL)).toString();
-  const responseText = await postJson(
-    endpoint,
-    buildILinkHeaders(valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN), config.headers || {}),
-    body,
-    Number(valueFrom(config.timeoutMs, 15000)),
-  );
-  const response = responseText ? JSON.parse(responseText) : {};
-  return { response, plaintext, ciphertextSize: body.filesize };
-}
-
-function buildCdnUploadUrl({ cdnBaseUrl, uploadParam, filekey }) {
-  return `${cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`;
-}
-
-async function uploadBufferToCdn({ plaintext, uploadUrl, uploadParam, filekey, aeskey, config }) {
-  const cdnBaseUrl = valueFrom(config.cdnBaseUrl, process.env.WEIXIN_CDN_BASE_URL, DEFAULT_CDN_BASE_URL);
-  const target = uploadUrl?.trim() || buildCdnUploadUrl({ cdnBaseUrl, uploadParam, filekey });
-  const ciphertext = encryptAesEcb(plaintext, aeskey);
-  let lastError = null;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      const response = await fetch(target, {
-        method: "POST",
-        headers: { "content-type": "application/octet-stream" },
-        body: new Uint8Array(ciphertext),
-      });
-      if (response.status !== 200) {
-        const body = await response.text();
-        throw new Error(`CDN upload failed: HTTP ${response.status} ${body}`);
-      }
-      const encryptedParam = response.headers.get("x-encrypted-param");
-      if (!encryptedParam) throw new Error("CDN upload response missing x-encrypted-param");
-      return encryptedParam;
-    } catch (error) {
-      lastError = error;
-      if (attempt === 3) break;
-    }
-  }
-  throw lastError || new Error("CDN upload failed");
-}
-
-async function uploadImageFile(filePath, config) {
-  const resolved = path.resolve(expandHome(filePath));
-  const stat = fs.statSync(resolved);
-  if (!stat.isFile()) throw new Error(`Image path is not a file: ${resolved}`);
-  const maxBytes = Number(valueFrom(config.maxMediaBytes, process.env.CODEX_WEIXIN_MAX_MEDIA_BYTES, MAX_MEDIA_BYTES));
-  if (stat.size > maxBytes) throw new Error(`Image file too large: ${stat.size} bytes > ${maxBytes} bytes`);
-
-  const toUser = valueFrom(config.toUser, config.userId, config.ilinkUserId, process.env.WEIXIN_TO_USER);
-  if (!valueFrom(config.token, process.env.WEIXIN_ILINK_TOKEN)) throw new Error("Missing Weixin iLink token. Run pair-weixin.mjs first.");
-  if (!toUser) throw new Error("Missing Weixin recipient. Run bind-recipient.mjs first.");
-
-  const aeskey = crypto.randomBytes(16);
-  const filekey = crypto.randomBytes(16).toString("hex");
-  const { response, plaintext, ciphertextSize } = await getUploadUrl({
-    filePath: resolved,
-    toUser,
-    mediaType: MEDIA_TYPE_IMAGE,
-    config,
-    stat,
-    aeskey,
-    filekey,
-  });
-  const uploadParam = response.upload_param;
-  const uploadUrl = response.upload_full_url;
-  if (!uploadUrl && !uploadParam) throw new Error("getuploadurl returned no upload URL");
-  const downloadEncryptedQueryParam = await uploadBufferToCdn({
-    plaintext,
-    uploadUrl,
-    uploadParam,
-    filekey,
-    aeskey,
-    config,
-  });
-  return {
-    fileSizeCiphertext: ciphertextSize,
-    media: {
-      encrypt_query_param: downloadEncryptedQueryParam,
-      aes_key: Buffer.from(aeskey.toString("hex")).toString("base64"),
-      encrypt_type: 1,
-    },
-  };
-}
-
-function imageItemFromUpload(uploaded) {
-  return {
-    type: MESSAGE_ITEM_IMAGE,
-    image_item: {
-      media: uploaded.media,
-      mid_size: uploaded.fileSizeCiphertext,
-    },
-  };
-}
-
-async function postOfficialImageItems(items, event, config, args) {
-  const timeoutMs = Number(valueFrom(args.timeout, config.timeoutMs, DEFAULT_TIMEOUT_MS));
-  for (const item of items) {
-    const request = buildOfficialMessageItemsRequest([item], event, config);
-    await postJson(request.endpoint, request.headers, request.body, timeoutMs);
-  }
-}
-
-async function trySendMarkdownImageNotification(message, event, config, args) {
-  if (!markdownImageRepliesEnabled(config)) return false;
-  if (config.endpoint || process.env.WEIXIN_ILINK_ENDPOINT) return false;
-  try {
-    const rendered = await renderMarkdownImages(message, markdownImageOptions(config, config.title || "Codex task completed"));
-    if (config.dryRun) {
-      for (const filePath of rendered.filePaths) {
-        const stat = fs.statSync(filePath);
-        process.stdout.write(`[dry-run media] image ${filePath} ${stat.size} bytes\n`);
-      }
-      return true;
-    }
-    const uploaded = [];
-    for (const filePath of rendered.filePaths) uploaded.push(await uploadImageFile(filePath, config));
-    const items = uploaded.map(imageItemFromUpload);
-    await postOfficialImageItems(items, event, config, args);
-    return true;
-  } catch (error) {
-    process.stderr.write(`[markdown-image-fallback] ${error.message}\n`);
-    return false;
-  }
-}
-
 export async function sendWeixinNotification(event, config, args = {}) {
   const message = formatMessage(event, config);
-
-  if (await trySendMarkdownImageNotification(message, event, config, args)) {
-    if (!config.dryRun) process.stdout.write(`Sent Weixin image notification for session ${event.sessionId}\n`);
-    return { ok: true, transport: "image", message };
-  }
 
   if (config.dryRun) {
     process.stdout.write(`${message}\n`);
