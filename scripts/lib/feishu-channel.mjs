@@ -41,7 +41,7 @@ export function createFeishuChannel(config, options = {}) {
     appSecret: config.appSecret,
     domain: feishuDomain(config, sdk),
     loggerLevel: loggerLevel(config, sdk),
-    source: "codex-notifier",
+    source: "catm",
     includeRawEvent: false,
     handshakeTimeoutMs: Number(config.feishuHandshakeTimeoutMs || 15000),
     policy: {

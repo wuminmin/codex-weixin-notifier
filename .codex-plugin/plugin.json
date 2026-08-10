@@ -1,28 +1,28 @@
 {
   "name": "coding-agent-task-monitor",
-  "version": "0.2.0",
-  "description": "Monitor Claude Code, opencode, and Codex tasks and send Weixin/Feishu notifications from multiple bots.",
+  "version": "1.0.0",
+  "description": "Run one tenant-scoped MCP server for author decisions and coding-agent session control.",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "编码智能体任务监控",
-    "shortDescription": "监控编码智能体任务，并通过微信/飞书发送通知。",
-    "longDescription": "提供微信/iLink、飞书和 Lark 的编码智能体任务监控、完成通知、媒体消息和隔离任务路由。",
+    "displayName": "CATM Author Control",
+    "shortDescription": "Shared MCP session control over Weixin, Feishu, and Lark.",
+    "longDescription": "Runs one local tenant-scoped MCP daemon for coding-agent sessions, author decisions, instruction inboxes, and completion notifications.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [
       "Notify",
-      "Automation",
-      "Commands",
-      "Task Management"
+      "MCP",
+      "Session Management",
+      "Author Decisions"
     ],
     "defaultPrompt": [
-      "Help me configure Weixin completion notifications.",
-      "Configure a Feishu application bot for coding-agent tasks.",
-      "Send a test coding-agent completion notification.",
-      "Start the task-monitor channel router."
+      "Configure the CATM shared MCP daemon.",
+      "Bind my author identity on Weixin or Feishu.",
+      "Configure Codex, Claude Code, and opencode MCP clients.",
+      "Show controllable coding-agent sessions."
     ],
     "brandColor": "#18A058"
   }

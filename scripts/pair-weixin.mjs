@@ -1,273 +1,84 @@
 #!/usr/bin/env node
 
 import crypto from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
+import { fileURLToPath } from "node:url";
+import { loadConfig, saveConfig } from "./lib/catm-config.mjs";
 
-const DEFAULT_CONFIG_PATH = "~/.codex/weixin-notifier.json";
-const COMPAT_ACCOUNT_PATH = "~/.codex/channels/wechat/account.json";
-const DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
-const DEFAULT_ILINK_BOT_TYPE = "3";
-const ILINK_APP_ID = "bot";
-const ILINK_APP_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 6);
-const QR_LONG_POLL_TIMEOUT_MS = 35_000;
-const LOGIN_TIMEOUT_MS = 8 * 60_000;
-
-function expandHome(value) {
-  if (!value) return value;
-  if (value === "~") return os.homedir();
-  if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
-  return value;
-}
+const DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com";
+const CLIENT_VERSION = String((2 << 16) | (4 << 8) | 6);
 
 function parseArgs(argv) {
-  const result = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    const item = argv[i];
-    if (!item.startsWith("--")) continue;
-    const key = item.slice(2);
-    const next = argv[i + 1];
-    if (!next || next.startsWith("--")) {
-      result[key] = "true";
-    } else {
-      result[key] = next;
-      i += 1;
-    }
+  const out = {};
+  for (let i = 0; i < argv.length; i += 1) if (argv[i].startsWith("--")) {
+    const key = argv[i].slice(2); const next = argv[i + 1];
+    if (!next || next.startsWith("--")) out[key] = true; else { out[key] = next; i += 1; }
   }
-  return result;
+  return out;
 }
 
-function ensureTrailingSlash(url) {
-  return url.endsWith("/") ? url : `${url}/`;
-}
-
-function buildCommonHeaders() {
+function headers(token) {
   return {
-    "iLink-App-Id": ILINK_APP_ID,
-    "iLink-App-ClientVersion": ILINK_APP_CLIENT_VERSION,
-  };
-}
-
-function randomWechatUin() {
-  const uint32 = crypto.randomBytes(4).readUInt32BE(0);
-  return Buffer.from(String(uint32), "utf8").toString("base64");
-}
-
-function buildPostHeaders(token) {
-  const headers = {
     "content-type": "application/json",
-    AuthorizationType: "ilink_bot_token",
-    "X-WECHAT-UIN": randomWechatUin(),
-    ...buildCommonHeaders(),
+    "iLink-App-Id": "bot",
+    "iLink-App-ClientVersion": CLIENT_VERSION,
+    "X-WECHAT-UIN": Buffer.from(String(crypto.randomBytes(4).readUInt32BE(0))).toString("base64"),
+    ...(token ? { authorization: `Bearer ${token}`, AuthorizationType: "ilink_bot_token" } : {}),
   };
-  if (token) headers.authorization = `Bearer ${token}`;
-  return headers;
 }
 
-async function fetchWithTimeout(url, init, timeoutMs) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${text}`);
-    }
-    return JSON.parse(text);
-  } finally {
-    clearTimeout(timeout);
-  }
+async function request(baseUrl, endpoint, { method = "GET", body, token, timeout = 40_000 } = {}) {
+  const response = await fetch(new URL(endpoint, `${baseUrl.replace(/\/?$/u, "/")}`), {
+    method, headers: headers(token), ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(timeout),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Weixin HTTP ${response.status}: ${text.slice(0, 300)}`);
+  return JSON.parse(text);
 }
 
-async function postJson(baseUrl, endpoint, body, token, timeoutMs = 15_000) {
-  const url = new URL(endpoint, ensureTrailingSlash(baseUrl)).toString();
-  return fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: buildPostHeaders(token),
-      body: JSON.stringify(body),
-    },
-    timeoutMs,
-  );
+async function displayQr(url) {
+  const qrcode = await import("qrcode-terminal");
+  qrcode.default.generate(url, { small: true });
+  process.stdout.write(`\nQR URL: ${url}\n\n`);
 }
 
-async function getJson(baseUrl, endpoint, timeoutMs = QR_LONG_POLL_TIMEOUT_MS) {
-  const url = new URL(endpoint, ensureTrailingSlash(baseUrl)).toString();
-  return fetchWithTimeout(
-    url,
-    {
-      method: "GET",
-      headers: buildCommonHeaders(),
-    },
-    timeoutMs,
-  );
-}
-
-async function displayQRCode(qrcodeUrl) {
-  try {
-    const qrterm = await import("qrcode-terminal");
-    qrterm.default.generate(qrcodeUrl, { small: true });
-  } catch {
-    process.stdout.write("Could not render a terminal QR code. Open this URL instead:\n");
-  }
-  process.stdout.write(`\nQR URL: ${qrcodeUrl}\n\n`);
-}
-
-async function promptLine(prompt) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return (await rl.question(prompt)).trim();
-  } finally {
-    rl.close();
-  }
-}
-
-function saveConfig(configPath, update) {
-  const resolved = expandHome(configPath);
-  fs.mkdirSync(path.dirname(resolved), { recursive: true });
-  let existing = {};
-  try {
-    if (fs.existsSync(resolved)) {
-      existing = JSON.parse(fs.readFileSync(resolved, "utf8"));
-    }
-  } catch {
-    existing = {};
-  }
-  const merged = {
-    ...existing,
-    ...update,
-    pairedAt: new Date().toISOString(),
-  };
-  fs.writeFileSync(resolved, JSON.stringify(merged, null, 2), "utf8");
-  try {
-    fs.chmodSync(resolved, 0o600);
-  } catch {
-    // best effort on filesystems that support chmod
-  }
-  return resolved;
-}
-
-function saveCompatAccount(update) {
-  const resolved = expandHome(COMPAT_ACCOUNT_PATH);
-  fs.mkdirSync(path.dirname(resolved), { recursive: true });
-  const account = {
-    token: update.token,
-    baseUrl: update.baseUrl,
-    accountId: update.botId,
-    userId: update.userId,
-    savedAt: update.pairedAt || new Date().toISOString(),
-  };
-  fs.writeFileSync(resolved, JSON.stringify(account, null, 2) + "\n", "utf8");
-  try {
-    fs.chmodSync(resolved, 0o600);
-  } catch {
-    // best effort on filesystems that support chmod
-  }
-  return resolved;
-}
-
-async function startLogin(baseUrl, botType) {
-  return postJson(
-    baseUrl,
-    `ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(botType)}`,
-    { local_token_list: [] },
-  );
-}
-
-async function pollStatus(baseUrl, qrcode, verifyCode) {
-  let endpoint = `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
-  if (verifyCode) endpoint += `&verify_code=${encodeURIComponent(verifyCode)}`;
-  try {
-    return await getJson(baseUrl, endpoint);
-  } catch (error) {
-    if (error?.name === "AbortError") return { status: "wait" };
-    process.stdout.write(`\nPolling warning: ${String(error.message || error)}\n`);
-    return { status: "wait" };
-  }
-}
-
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const configPath = args.config || process.env.CODEX_WEIXIN_CONFIG || DEFAULT_CONFIG_PATH;
-  const botType = args["bot-type"] || process.env.WEIXIN_ILINK_BOT_TYPE || DEFAULT_ILINK_BOT_TYPE;
-  const startBaseUrl = args["base-url"] || process.env.WEIXIN_ILINK_BASE_URL || DEFAULT_ILINK_BASE_URL;
-
-  process.stdout.write("Starting Codex Weixin pairing. Scan the QR code with Weixin.\n\n");
-  const qrResponse = await startLogin(startBaseUrl, botType);
-  if (!qrResponse.qrcode || !qrResponse.qrcode_img_content) {
-    throw new Error(`Unexpected QR response: ${JSON.stringify(qrResponse)}`);
-  }
-  await displayQRCode(qrResponse.qrcode_img_content);
-
-  const deadline = Date.now() + LOGIN_TIMEOUT_MS;
-  let currentBaseUrl = startBaseUrl;
-  let verifyCode;
-  let scannedPrinted = false;
-
+export async function runPairWeixin(argv = process.argv.slice(2), options = {}) {
+  const args = parseArgs(argv);
+  const loaded = loadConfig(options);
+  const baseUrl = String(args["base-url"] || DEFAULT_BASE_URL);
+  const start = await request(baseUrl, `ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(args["bot-type"] || "3")}`, { method: "POST", body: { local_token_list: [] } });
+  if (!start.qrcode || !start.qrcode_img_content) throw new Error("Unexpected Weixin QR response");
+  process.stdout.write("Scan this QR code with Weixin.\n");
+  await displayQr(start.qrcode_img_content);
+  const deadline = Date.now() + 8 * 60_000;
+  let activeBase = baseUrl;
+  let verifyCode = "";
   while (Date.now() < deadline) {
-    const status = await pollStatus(currentBaseUrl, qrResponse.qrcode, verifyCode);
-    switch (status.status) {
-      case "wait":
-        process.stdout.write(".");
-        break;
-      case "scaned":
-        if (!scannedPrinted) {
-          process.stdout.write("\nScanned. Confirm authorization on your phone.\n");
-          scannedPrinted = true;
-        }
-        verifyCode = undefined;
-        break;
-      case "scaned_but_redirect":
-        if (status.redirect_host) currentBaseUrl = `https://${status.redirect_host}`;
-        break;
-      case "need_verifycode":
-        verifyCode = await promptLine("\nEnter the number shown in Weixin: ");
-        break;
-      case "verify_code_blocked":
-        throw new Error("Too many wrong verification-code attempts. Run pairing again later.");
-      case "expired":
-        throw new Error("QR code expired. Run pairing again.");
-      case "binded_redirect":
-        process.stdout.write("\nThis Weixin account is already paired with this iLink bot.\n");
-        return;
-      case "confirmed": {
-        if (!status.bot_token || !status.ilink_bot_id) {
-          throw new Error(`Confirmed but missing token or bot id: ${JSON.stringify(status)}`);
-        }
-        const pairedAt = new Date().toISOString();
-        const credentials = {
-          transport: "ilink-login",
-          baseUrl: status.baseurl || currentBaseUrl,
-          token: status.bot_token,
-          botId: status.ilink_bot_id,
-          userId: status.ilink_user_id,
-          toUser: status.ilink_user_id,
-          title: "Codex task completed",
-          timeoutMs: 8000,
-          maxSummaryLength: 800,
-          pairedAt,
-        };
-        const savedPath = saveConfig(configPath, credentials);
-        const compatPath = saveCompatAccount(credentials);
-        process.stdout.write(`\nPaired. Config saved to ${savedPath}\n`);
-        process.stdout.write(`Compat account saved to ${compatPath}\n`);
-        return;
-      }
-      default:
-        process.stdout.write(`\nUnknown status: ${JSON.stringify(status)}\n`);
-        break;
+    let endpoint = `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(start.qrcode)}`;
+    if (verifyCode) endpoint += `&verify_code=${encodeURIComponent(verifyCode)}`;
+    let status;
+    try { status = await request(activeBase, endpoint); } catch (error) { if (error.name === "TimeoutError") continue; throw error; }
+    if (status.status === "scaned_but_redirect" && status.redirect_host) activeBase = `https://${status.redirect_host}`;
+    else if (status.status === "need_verifycode") {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try { verifyCode = (await rl.question("Enter the number shown in Weixin: ")).trim(); } finally { rl.close(); }
+    } else if (status.status === "expired") throw new Error("Weixin QR code expired");
+    else if (status.status === "verify_code_blocked") throw new Error("Weixin verification is temporarily blocked");
+    else if (status.status === "confirmed") {
+      if (!status.bot_token || !status.ilink_bot_id) throw new Error("Weixin confirmation did not return credentials");
+      const tenant = loaded.config.tenants[loaded.config.defaultTenantId];
+      tenant.channels.weixin = {
+        type: "weixin", enabled: true, baseUrl: status.baseurl || activeBase,
+        token: status.bot_token, botId: status.ilink_bot_id, userId: status.ilink_user_id || "", authorTargets: {},
+      };
+      saveConfig(loaded.config, { paths: loaded.paths });
+      process.stdout.write(`Weixin saved to ${loaded.paths.configPath}. Restart CATM, then run \"catm bind-code\".\n`);
+      return tenant.channels.weixin;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-
-  throw new Error("Pairing timed out. Run pairing again.");
+  throw new Error("Weixin pairing timed out");
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error.stack || error.message}\n`);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) runPairWeixin().catch((error) => { process.stderr.write(`${error.message}\n`); process.exit(1); });

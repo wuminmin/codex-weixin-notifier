@@ -1,0 +1,107 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { catmPaths } from "./catm-paths.mjs";
+import { readJson, writeJson, ensurePrivateDir } from "./atomic-json.mjs";
+
+const TENANT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
+const CLIENT_TYPES = new Set(["codex", "claude", "opencode"]);
+
+export function validateTenantId(value) {
+  if (!TENANT_ID.test(String(value || ""))) throw new Error("tenant_id must be a lowercase slug of at most 64 characters");
+  return String(value);
+}
+
+export function newConfig({ tenantId = "default", tenantName = "Default", host = "127.0.0.1", port } = {}) {
+  const id = validateTenantId(tenantId);
+  if (!Number.isInteger(port) || port < 49152 || port > 65535) throw new Error("server port must be in 49152..65535");
+  return {
+    version: 1,
+    server: { host, port, maxBodyBytes: 262_144, maxConnections: 128 },
+    defaultTenantId: id,
+    tenants: {
+      [id]: {
+        tenantId: id,
+        displayName: String(tenantName || "Default"),
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        authors: {},
+        channels: {},
+        clientCredentials: {},
+      },
+    },
+  };
+}
+
+export function validateConfig(config) {
+  if (!config || config.version !== 1) throw new Error("CATM 1.0 requires config schema version 1; run `catm onboard`");
+  if (config.server?.host !== "127.0.0.1") throw new Error("CATM server.host must be 127.0.0.1");
+  if (!Number.isInteger(config.server?.port) || config.server.port < 49152 || config.server.port > 65535) throw new Error("CATM server.port must be in 49152..65535");
+  const ids = Object.keys(config.tenants || {});
+  if (ids.length < 1) throw new Error("CATM config requires at least one tenant");
+  const id = validateTenantId(config.defaultTenantId);
+  if (!config.tenants[id] || config.tenants[id].tenantId !== id) throw new Error("default tenant is inconsistent");
+  for (const [tenantId, tenant] of Object.entries(config.tenants)) {
+    validateTenantId(tenantId);
+    if (tenant.tenantId !== tenantId) throw new Error(`tenant is inconsistent: ${tenantId}`);
+  }
+  return config;
+}
+
+export function loadConfig(options = {}) {
+  const paths = options.paths || catmPaths(options);
+  const config = readJson(options.configPath || paths.configPath);
+  if (!config) throw new Error(`CATM is not initialized: ${options.configPath || paths.configPath}`);
+  return { config: validateConfig(config), paths };
+}
+
+export function saveConfig(config, options = {}) {
+  const paths = options.paths || catmPaths(options);
+  ensurePrivateDir(paths.configDir);
+  return writeJson(options.configPath || paths.configPath, validateConfig(config), 0o600);
+}
+
+export function hashToken(token) {
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
+
+export function createClientCredential(config, clientType, tenantId = config.defaultTenantId) {
+  if (!CLIENT_TYPES.has(clientType)) throw new Error(`Unsupported MCP client type: ${clientType}`);
+  validateTenantId(tenantId);
+  const tenant = config.tenants[tenantId];
+  if (!tenant?.enabled) throw new Error(`tenant not found: ${tenantId}`);
+  const token = crypto.randomBytes(32).toString("base64url");
+  const credentialId = `${clientType}-local`;
+  tenant.clientCredentials[credentialId] = {
+    credentialId,
+    tenantId,
+    clientType,
+    tokenHash: hashToken(token),
+    enabled: true,
+    createdAt: new Date().toISOString(),
+  };
+  return { credentialId, tenantId, token };
+}
+
+export function resolveCredential(config, authorization) {
+  const match = /^Bearer\s+(.+)$/iu.exec(String(authorization || ""));
+  if (!match) return null;
+  const candidate = Buffer.from(hashToken(match[1]));
+  for (const tenant of Object.values(config.tenants)) {
+    for (const credential of Object.values(tenant.clientCredentials || {})) {
+      if (!credential.enabled) continue;
+      const expected = Buffer.from(String(credential.tokenHash || ""));
+      if (candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected)) return credential;
+    }
+  }
+  return null;
+}
+
+export function tenantStateDir(paths, tenantId) {
+  return path.join(paths.tenantRoot, validateTenantId(tenantId));
+}
+
+export function assertPrivateConfig(filePath) {
+  const mode = fs.statSync(filePath).mode & 0o777;
+  if ((mode & 0o077) !== 0) throw new Error(`CATM config must not be group/world accessible: ${filePath}`);
+}

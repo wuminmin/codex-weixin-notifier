@@ -1,18 +1,20 @@
 {
   "name": "coding-agent-task-monitor",
-  "version": "0.2.0",
-  "description": "Monitor Claude Code, opencode, and Codex tasks and send Weixin/Feishu notifications from multiple bots.",
+  "version": "1.0.0",
+  "description": "Shared tenant-scoped MCP server for author decisions and coding-agent session control over Weixin, Feishu, and Lark.",
   "license": "MIT",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "start": "node scripts/catm.mjs server start"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.71.1",
-    "@napi-rs/canvas": "^1.0.3",
-    "marked": "^18.0.5",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.2.1",
+    "jsonc-parser": "^3.3.1",
     "qrcode-terminal": "^0.12.0"
   }
 }
