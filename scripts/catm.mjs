@@ -63,8 +63,9 @@ function daemonRunning(paths) {
 
 function daemonPidIsCatm(pid) {
   try {
-    const command = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/gu, " ");
-    return /(?:^|\s)(?:[^\s/]+\/)?node(?:\s|$)/u.test(command) && /catm-daemon\.mjs/u.test(command);
+    const argv = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+    return /^node(?:js)?(?:\.exe)?$/iu.test(path.basename(argv[0] || ""))
+      && path.basename(argv[1] || "") === "catm-daemon.mjs";
   } catch { return false; }
 }
 
@@ -179,6 +180,12 @@ async function main(argv = process.argv.slice(2), options = {}) {
   throw new Error(`Unknown command.\n${usage()}`);
 }
 
-export { main, onboard, rebind, selectedTypes };
+export { daemonPidIsCatm, main, onboard, rebind, selectedTypes };
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main().catch((error) => { process.stderr.write(`${error.message}\n`); process.exit(1); });
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try { return fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); }
+  catch { return false; }
+}
+
+if (isMainModule()) main().catch((error) => { process.stderr.write(`${error.message}\n`); process.exit(1); });
