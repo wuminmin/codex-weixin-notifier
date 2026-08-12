@@ -15,7 +15,7 @@ Use the configured \`catm\` MCP server for this coding session. Call \`sync_sess
 
 When progress requires a genuine author decision, call \`request_author_decision\` with a new idempotency key, then keep one \`wait_author_decision\` call active until it returns an answer. After an answer, call \`sync_session\` again. If the wait connection ends while still pending, tell the author that reopening the agent is required; the answer remains durable on CATM.
 
-Treat instructions returned by \`sync_session\` as author messages and acknowledge their ids on the next sync. Before final delivery, call \`notify_work_completed\` exactly once for the current work cycle. Never send credentials, secrets, full logs, or unnecessary source text through CATM.
+Treat instructions returned by \`sync_session\` as author messages and acknowledge their ids on the next sync. Before final delivery, draft the exact complete user-visible final response, call \`notify_work_completed\` exactly once for the current work cycle with that response unchanged in \`summary\`, then send the same response to the user without edits. The server adds the agent, session, work-cycle, workspace, and task identity header; do not add that header to \`summary\`. The optional \`verification\` field is internal metadata and is not rendered in the author notification. Never send credentials, secrets, full logs, or unnecessary source text through CATM.
 ${PROMPT_END}`;
 
 function writePrivateText(file, text) {

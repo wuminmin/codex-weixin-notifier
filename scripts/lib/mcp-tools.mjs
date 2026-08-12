@@ -2,7 +2,7 @@ import * as z from "zod/v4";
 import { TenantStore } from "./tenant-store.mjs";
 import { fanOutAuthorMessage, formatCompletionMessage, formatDecisionMessage } from "./channel-notifier.mjs";
 
-const INSTRUCTIONS = `CATM manages author communication for coding-agent sessions. Call sync_session before substantive work, after each major stage, about every five minutes during continuous work, before and after an author decision, and before completion. Exhaust safe repository exploration before asking the author. Use request_author_decision only for true author choices, then keep wait_author_decision active until it returns answered. A mobile answer resumes an active wait immediately; if the wait disconnects, the answer remains durable but cannot wake a stopped agent. Never send secrets, full logs, or unnecessary source code. Before final delivery call notify_work_completed exactly once for the current work cycle.`;
+const INSTRUCTIONS = `CATM manages author communication for coding-agent sessions. Call sync_session before substantive work, after each major stage, about every five minutes during continuous work, before and after an author decision, and before completion. Exhaust safe repository exploration before asking the author. Use request_author_decision only for true author choices, then keep wait_author_decision active until it returns answered. A mobile answer resumes an active wait immediately; if the wait disconnects, the answer remains durable but cannot wake a stopped agent. Never send secrets, full logs, or unnecessary source code. Before final delivery, draft the exact complete user-visible final response, call notify_work_completed exactly once for the current work cycle with that response unchanged in summary, then send the same response to the user without edits. CATM adds the agent identity header; verification is internal metadata and is not rendered in the author notification.`;
 
 function result(value, isError = false) {
   return {
@@ -148,11 +148,11 @@ export function createToolContext({
 
   mcpServer.registerTool("notify_work_completed", {
     title: "Notify work-cycle completion",
-    description: "Send one idempotent completion notification for the current session work cycle and leave the session idle for future instructions.",
+    description: "Send one idempotent completion notification for the current session work cycle. Pass the exact complete user-visible final response unchanged in summary; CATM prepends agent identity, while verification remains internal and is not rendered.",
     inputSchema: {
       session_id: z.string().regex(/^S\d+$/iu),
       work_cycle_id: z.string().regex(/^W\d+$/iu),
-      summary: z.string().min(1).max(4000),
+      summary: z.string().min(1).max(12000),
       verification: z.string().max(4000).default(""),
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },

@@ -121,6 +121,8 @@ An active wait sends a protocol heartbeat every 15 seconds, rechecks persistent 
 
 Remote instructions use at-least-once delivery. They are returned by `sync_session` until the agent acknowledges their instruction ids on a later sync.
 
+Completion notifications prepend the agent type, session id, work-cycle id, workspace, and task label so one author bot can distinguish multiple agents and multiple working directories. The remaining notification body is the agent's exact final user-visible response. Agents pass that response unchanged in `notify_work_completed.summary`; `verification` is retained as internal metadata and is not rendered.
+
 ## Operations
 
 Check service health and logs:

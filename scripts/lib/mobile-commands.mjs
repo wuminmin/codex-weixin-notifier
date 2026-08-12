@@ -11,7 +11,7 @@ help
 When a decision is pending, reply with the answer directly.`;
 
 function sessionLine(session) {
-  return `${session.sessionId}  ${session.status}  ${session.agent}  ${session.label}${session.unacknowledged ? `  inbox:${session.unacknowledged}` : ""}${session.pendingDecisions ? `  decisions:${session.pendingDecisions}` : ""}`;
+  return `${session.sessionId}  ${session.status}  ${session.agent}  ${session.workspace}  ${session.label}${session.unacknowledged ? `  inbox:${session.unacknowledged}` : ""}${session.pendingDecisions ? `  decisions:${session.pendingDecisions}` : ""}`;
 }
 
 function parseCommand(text) {

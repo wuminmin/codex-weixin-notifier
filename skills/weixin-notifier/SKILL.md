@@ -52,7 +52,7 @@ When a decision notification is the latest pending decision for that phone conve
 
 ## MCP behavior and diagnosis
 
-Agents call `sync_session` at work start, around major stages and decisions, after verification, before completion, and about every five minutes. Each author question gets a separate `request_author_decision` and idempotency key, followed by one active `wait_author_decision`. The agent calls `notify_work_completed` once per returned `work_cycle_id`.
+Agents call `sync_session` at work start, around major stages and decisions, after verification, before completion, and about every five minutes. Each author question gets a separate `request_author_decision` and idempotency key, followed by one active `wait_author_decision`. Before the final answer, the agent drafts the exact complete user-visible response, calls `notify_work_completed` once per returned `work_cycle_id` with that response unchanged in `summary`, and then sends the same response to the user without edits. CATM prepends an identity header containing the agent type, session id, work-cycle id, workspace, and task label. `verification` remains stored internal metadata and is not rendered in the author notification.
 
 An active wait emits a heartbeat every 15 seconds and polls durable state every five seconds. A timeout returns `pending`, not an invented answer. After a phone answer, verify all three layers without exposing content or secrets:
 

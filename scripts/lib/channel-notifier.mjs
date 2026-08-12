@@ -82,7 +82,9 @@ export async function fanOutAuthorMessage(tenant, text, options = {}) {
 export function formatDecisionMessage(decision, session) {
   const lines = [
     `Author decision ${decision.shortCode}`,
-    `Session: ${decision.sessionId} · ${session.label}`,
+    `Agent: ${session.agent} · Session: ${decision.sessionId} · Work cycle: W${session.workCycle}`,
+    `Workspace: ${session.workspace}`,
+    `Task: ${session.label}`,
     "",
     decision.question,
   ];
@@ -98,10 +100,10 @@ export function formatDecisionMessage(decision, session) {
 
 export function formatCompletionMessage(completion, session) {
   return [
-    `Work completed · ${session.sessionId}`,
-    session.label,
+    `Agent: ${session.agent} · Session: ${session.sessionId} · Work cycle: ${completion.workCycleId}`,
+    `Workspace: ${session.workspace}`,
+    `Task: ${session.label}`,
     "",
     completion.summary,
-    completion.verification ? `\nVerification: ${completion.verification}` : "",
-  ].filter(Boolean).join("\n");
+  ].join("\n");
 }

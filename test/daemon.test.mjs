@@ -99,6 +99,10 @@ test("NAS daemon secures HTTP and resumes an active Claude wait from a direct ph
   assert.match(inactiveReply, /No active Claude wait/u);
   assert.equal(store.getDecision(inactive.structuredContent.decision_id).answer.optionId, "a");
   await clients[0].callTool({ name: "notify_work_completed", arguments: { session_id: session.session_id, work_cycle_id: session.work_cycle_id, summary: "Done", verification: "Passed" } });
+  assert.match(notices.at(-1), /Agent: claude · Session: S1 · Work cycle: W1/u);
+  assert.match(notices.at(-1), /Workspace: \/work\/0/u);
+  assert.ok(notices.at(-1).endsWith("Done"));
+  assert.doesNotMatch(notices.at(-1), /Passed|Verification:/u);
   const duplicate = await clients[0].callTool({ name: "notify_work_completed", arguments: { session_id: session.session_id, work_cycle_id: session.work_cycle_id, summary: "Done", verification: "Passed" } });
   assert.equal(duplicate.structuredContent.delivery_status, "deduplicated");
   assert.ok(!JSON.stringify(duplicate.structuredContent).includes("tenant"));

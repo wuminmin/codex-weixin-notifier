@@ -333,7 +333,7 @@ export class TenantStore {
         tenantId: this.tenantId,
         sessionId,
         workCycleId: expected,
-        summary: cleanText(input.summary, 4000, "summary"),
+        summary: cleanText(input.summary, 12000, "summary"),
         verification: String(input.verification || "").trim().slice(0, 4000),
         delivery: [],
         createdAt: now(),

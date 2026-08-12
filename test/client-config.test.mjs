@@ -17,7 +17,10 @@ test("all clients share one remote URL and token with long waits", (t) => {
   assert.equal(claude.mcpServers.catm.timeout, 21_630_000);
   assert.equal(opencode.mcp.servers.catm.timeout.execution, 21_630_000);
   assert.ok([codex, JSON.stringify(claude), JSON.stringify(opencode)].every((text) => text.includes(URL) && text.includes("shared-token")));
-  assert.match(fs.readFileSync(path.join(env.home, ".claude", "CLAUDE.md"), "utf8"), /keep one `wait_author_decision` call active/u);
+  const prompt = fs.readFileSync(path.join(env.home, ".claude", "CLAUDE.md"), "utf8");
+  assert.match(prompt, /keep one `wait_author_decision` call active/u);
+  assert.match(prompt, /exact complete user-visible final response/u);
+  assert.match(prompt, /same response to the user without edits/u);
 });
 
 test("disconnect removes only CATM-managed config and prompts", (t) => {
