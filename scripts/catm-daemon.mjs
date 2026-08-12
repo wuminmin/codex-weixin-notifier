@@ -2,6 +2,7 @@
 
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import express from "express";
@@ -9,7 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { catmPaths } from "./lib/catm-paths.mjs";
-import { assertPrivateConfig, loadConfig, resolveCredential } from "./lib/catm-config.mjs";
+import { assertPrivateConfig, loadConfig, publicUrls, resolveCredential } from "./lib/catm-config.mjs";
 import { ensurePrivateDir } from "./lib/atomic-json.mjs";
 import { createToolContext, MCP_INSTRUCTIONS } from "./lib/mcp-tools.mjs";
 import { startChannelServices } from "./lib/channel-service.mjs";
@@ -20,28 +21,38 @@ function jsonRpcError(res, status, message) {
 }
 
 function allowedHosts(config) {
-  const publicUrl = new URL(config.server.publicUrl);
-  return new Set([
+  const values = [
     `127.0.0.1:${config.server.port}`,
     `localhost:${config.server.port}`,
-    publicUrl.host,
-    ...(publicUrl.port ? [] : [`${publicUrl.hostname}:443`]),
-  ].map((value) => value.toLowerCase()));
+  ];
+  for (const value of publicUrls(config)) {
+    const publicUrl = new URL(value);
+    values.push(publicUrl.host);
+    if (!publicUrl.port) values.push(`${publicUrl.hostname}:443`);
+  }
+  return new Set(values.map((value) => value.toLowerCase()));
 }
 
 function validOrigin(origin, config) {
   if (!origin) return true;
   try {
     const url = new URL(origin);
-    const publicUrl = new URL(config.server.publicUrl);
     const direct = ["127.0.0.1", "localhost"].includes(url.hostname);
-    return direct || url.origin === publicUrl.origin;
+    return direct || publicUrls(config).some((value) => url.origin === new URL(value).origin);
   } catch { return false; }
 }
 
 function validHost(value, config) {
   const host = String(value || "").toLowerCase();
   return allowedHosts(config).has(host) || /^(?:127\.0\.0\.1|localhost):\d+$/u.test(host);
+}
+
+function requestIdentity(req, config) {
+  const host = String(req.headers.host || "").toLowerCase();
+  const isPublicEndpoint = publicUrls(config).some((value) => new URL(value).host.toLowerCase() === host);
+  const cloudflareAddress = String(req.headers["cf-connecting-ip"] || "").trim();
+  if (isPublicEndpoint && net.isIP(cloudflareAddress)) return cloudflareAddress;
+  return String(req.socket.remoteAddress || "unknown");
 }
 
 function acquireInstanceLock(lockPath) {
@@ -72,11 +83,11 @@ export function createCatmApp({ config, paths, notifier, waitRegistry = new Deci
   let activeRequests = 0;
 
   app.use((req, res, next) => validHost(req.headers.host, config) ? next() : res.status(403).json({ error: "forbidden host" }));
-  app.get("/health", (_req, res) => res.json({ status: "ready", version: "2.0.0" }));
+  app.get("/health", (_req, res) => res.set("Cache-Control", "no-store").json({ status: "ready", version: "2.0.0" }));
 
   app.use("/mcp", (req, res, next) => {
     if (!validOrigin(req.headers.origin, config)) return res.status(403).json({ error: "forbidden origin" });
-    const remote = String(req.socket.remoteAddress || "");
+    const remote = requestIdentity(req, config);
     const recent = (authFailures.get(remote) || []).filter((at) => Date.now() - at < 60_000);
     if (recent.length >= 20) return res.status(429).json({ error: "too many authentication failures" });
     const credential = resolveCredential(config, req.headers.authorization);
@@ -186,7 +197,7 @@ export async function startDaemon(options = {}) {
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   const actualPort = Number(httpServer.address()?.port || listenPort);
-  process.stdout.write(`CATM 2.0 ready internally at http://127.0.0.1:${actualPort}/mcp\nPublic endpoint: ${loaded.config.server.publicUrl}\n`);
+  process.stdout.write(`CATM 2.0 ready internally at http://127.0.0.1:${actualPort}/mcp\nPublic endpoints: ${publicUrls(loaded.config).join(", ")}\n`);
   return { httpServer, close, host: listenHost, port: actualPort, waitRegistry };
 }
 

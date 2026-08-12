@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { connect, initialize, rotateToken } from "../scripts/catm.mjs";
+import { connect, endpoint, initialize, rotateToken } from "../scripts/catm.mjs";
 import { hashToken } from "../scripts/lib/catm-config.mjs";
 import { tempEnvironment } from "./helpers.mjs";
 
@@ -38,4 +38,14 @@ test("token rotation invalidates the previous shared token hash", async (t) => {
   const disk = fs.readFileSync(env.paths.configPath, "utf8");
   assert.ok(!disk.includes(hashToken(initialized.token)));
   assert.ok(disk.includes(hashToken(rotated.token)));
+});
+
+test("endpoint commands add, list, and remove a public MCP URL", async (t) => {
+  const env = tempEnvironment(); t.after(env.cleanup);
+  await initialize({ "public-url": "https://catm.example.ts.net/mcp" }, { paths: env.paths });
+  const added = endpoint("add", { url: "https://mcp.sessionbound.org/mcp" }, { paths: env.paths });
+  assert.equal(added.changed, true);
+  assert.deepEqual(endpoint("list", {}, { paths: env.paths }), ["https://catm.example.ts.net/mcp", "https://mcp.sessionbound.org/mcp"]);
+  const removed = endpoint("remove", { url: "https://mcp.sessionbound.org/mcp" }, { paths: env.paths });
+  assert.equal(removed.changed, true);
 });

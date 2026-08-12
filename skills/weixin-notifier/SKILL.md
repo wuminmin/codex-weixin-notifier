@@ -10,7 +10,7 @@ Use this skill for NAS deployment, remote MCP client connection, author-channel 
 ## Invariants
 
 - CATM runs only on the NAS in Docker Compose. Never start a CATM daemon in WSL or on a developer laptop.
-- Compose maps container port `61937` only to NAS loopback. Tailscale Serve provides the tailnet-only HTTPS endpoint; never recommend Funnel or public exposure.
+- Compose maps container port `61937` only to NAS loopback. Tailscale Serve is the private default. A public Cloudflare Tunnel endpoint is allowed only when the author explicitly requests it; keep bearer authentication, expose only `/mcp` and `/health` through a reverse proxy, and never publish the CATM port directly or use Tailscale Funnel.
 - Codex, Claude Code, and opencode use their built-in remote Streamable HTTP clients and one shared bearer token. Never print an existing token; initialization and rotation show a new token once.
 - Server config is schema v2 and lives in the Docker data volume. Do not migrate v1 state automatically.
 - Tenant isolation remains internal. Do not ask MCP callers or normal operators to provide tenant ids.
@@ -25,6 +25,11 @@ docker compose build
 docker compose run --rm catm init --public-url https://nas.tailnet.ts.net/mcp
 docker compose up -d
 sudo tailscale serve --bg http://127.0.0.1:61937
+
+# Optional, only for an explicitly requested Cloudflare deployment:
+docker compose stop catm
+docker compose run --rm catm endpoint add --url https://mcp.example.com/mcp
+docker compose -f compose.yaml -f compose.cloudflare.yaml up -d --build
 
 catm connect --url https://nas.tailnet.ts.net/mcp --agents all
 catm disconnect --agents all
@@ -55,4 +60,4 @@ An active wait emits a heartbeat every 15 seconds and polls durable state every 
 2. The phone received either the active-wait or reopen-agent confirmation.
 3. If the wait was active, the tool returned `wait_status: answered`.
 
-For operations, check `docker compose ps`, `/health`, `docker compose logs`, and `tailscale serve status`. Verify the NAS host exposes CATM only through loopback and tailnet HTTPS.
+For operations, check `docker compose ps`, `/health`, `docker compose logs`, and `tailscale serve status`. Verify the NAS host publishes CATM itself only on loopback. For an explicitly requested Cloudflare endpoint, also verify the public gateway allows only `/mcp` and `/health`, preserves streaming, requires the CATM bearer token on `/mcp`, and returns 404 for unrelated paths.

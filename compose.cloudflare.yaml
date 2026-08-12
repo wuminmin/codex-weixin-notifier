@@ -1,0 +1,12 @@
+services:
+  catm:
+    networks:
+      default:
+      public-gateway:
+        aliases:
+          - catm
+
+networks:
+  public-gateway:
+    external: true
+    name: nas-public-gateway

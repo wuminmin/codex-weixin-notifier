@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { catmPaths } from "./lib/catm-paths.mjs";
-import { createAccessToken, loadConfig, newConfig, normalizePublicUrl, saveConfig } from "./lib/catm-config.mjs";
+import { addPublicUrl, createAccessToken, loadConfig, newConfig, normalizePublicUrl, publicUrls, removePublicUrl, saveConfig } from "./lib/catm-config.mjs";
 import { configureClient, detectedAgents, disconnectClient } from "./lib/client-config.mjs";
 import { startDaemon } from "./catm-daemon.mjs";
 import { TenantStore } from "./lib/tenant-store.mjs";
@@ -32,6 +32,9 @@ function usage() {
 Server (NAS / Docker):
   catm init --public-url https://nas.example.ts.net/mcp
   catm server
+  catm endpoint list
+  catm endpoint add --url https://mcp.example.com/mcp
+  catm endpoint remove --url https://mcp.example.com/mcp
   catm token rotate
   catm channel weixin
   catm channel feishu [--mode manual|qr]
@@ -154,6 +157,30 @@ function rotateToken(options = {}) {
   return credential;
 }
 
+function endpoint(command, args, options = {}) {
+  const paths = options.paths || catmPaths(options);
+  const loaded = loadConfig({ paths });
+  if (command === "list") {
+    publicUrls(loaded.config).forEach((url) => process.stdout.write(`${url}\n`));
+    return publicUrls(loaded.config);
+  }
+  const pid = lockPid(paths);
+  if (pid && processAlive(pid)) throw new Error("Stop the CATM service before changing public endpoints");
+  if (command === "add") {
+    const changed = addPublicUrl(loaded.config, args.url);
+    if (changed) saveConfig(loaded.config, { paths });
+    process.stdout.write(changed ? `Added ${normalizePublicUrl(args.url)}. Restart CATM.\n` : `Endpoint already exists: ${normalizePublicUrl(args.url)}\n`);
+    return { changed, urls: publicUrls(loaded.config) };
+  }
+  if (command === "remove") {
+    const changed = removePublicUrl(loaded.config, args.url);
+    if (changed) saveConfig(loaded.config, { paths });
+    process.stdout.write(changed ? `Removed ${normalizePublicUrl(args.url)}. Restart CATM.\n` : `Endpoint not found: ${normalizePublicUrl(args.url)}\n`);
+    return { changed, urls: publicUrls(loaded.config) };
+  }
+  throw new Error("endpoint command must be list, add, or remove");
+}
+
 async function main(argv = process.argv.slice(2), options = {}) {
   const args = argsOf(argv);
   const [command, subcommand] = args._;
@@ -163,6 +190,7 @@ async function main(argv = process.argv.slice(2), options = {}) {
   if (command === "server" && !subcommand) return startDaemon({ paths });
   if (command === "connect") return connect(args, { ...options, paths });
   if (command === "disconnect") return disconnect(args, { ...options, paths });
+  if (command === "endpoint") return endpoint(subcommand, args, { ...options, paths });
   if (command === "token" && subcommand === "rotate") return rotateToken({ ...options, paths });
   if (command === "bind-code") {
     const { config } = loadConfig({ paths });
@@ -175,7 +203,7 @@ async function main(argv = process.argv.slice(2), options = {}) {
   throw new Error(`Unknown command.\n${usage()}`);
 }
 
-export { daemonPidIsCatm, initialize, connect, disconnect, main, rotateToken, selectedTypes, stopLegacyDaemon };
+export { daemonPidIsCatm, endpoint, initialize, connect, disconnect, main, rotateToken, selectedTypes, stopLegacyDaemon };
 
 function isMainModule() {
   if (!process.argv[1]) return false;

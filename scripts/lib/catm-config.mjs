@@ -24,6 +24,32 @@ export function normalizePublicUrl(value) {
   return url.toString().replace(/\/$/u, "");
 }
 
+export function publicUrls(config) {
+  const values = Array.isArray(config?.server?.publicUrls) && config.server.publicUrls.length
+    ? config.server.publicUrls
+    : [config?.server?.publicUrl];
+  return [...new Set(values.map(normalizePublicUrl))];
+}
+
+export function addPublicUrl(config, value) {
+  const normalized = normalizePublicUrl(value);
+  const urls = publicUrls(config);
+  if (urls.includes(normalized)) return false;
+  config.server.publicUrls = [...urls, normalized];
+  config.server.publicUrl = config.server.publicUrls[0];
+  return true;
+}
+
+export function removePublicUrl(config, value) {
+  const normalized = normalizePublicUrl(value);
+  const urls = publicUrls(config);
+  if (!urls.includes(normalized)) return false;
+  if (urls.length === 1) throw new Error("CATM must keep at least one public MCP URL");
+  config.server.publicUrls = urls.filter((url) => url !== normalized);
+  config.server.publicUrl = config.server.publicUrls[0];
+  return true;
+}
+
 export function newConfig({ tenantId = "default", tenantName = "Default", publicUrl } = {}) {
   const id = validateTenantId(tenantId);
   return {
@@ -32,6 +58,7 @@ export function newConfig({ tenantId = "default", tenantName = "Default", public
       host: SERVER_HOST,
       port: SERVER_PORT,
       publicUrl: normalizePublicUrl(publicUrl),
+      publicUrls: [normalizePublicUrl(publicUrl)],
       maxBodyBytes: 262_144,
       maxConnections: 128,
     },
@@ -55,7 +82,8 @@ export function validateConfig(config) {
   if (config.server?.host !== SERVER_HOST || config.server?.port !== SERVER_PORT) {
     throw new Error(`CATM server must listen on ${SERVER_HOST}:${SERVER_PORT}`);
   }
-  config.server.publicUrl = normalizePublicUrl(config.server.publicUrl);
+  config.server.publicUrls = publicUrls(config);
+  config.server.publicUrl = config.server.publicUrls[0];
   const ids = Object.keys(config.tenants || {});
   if (ids.length < 1) throw new Error("CATM config requires at least one tenant");
   const id = validateTenantId(config.defaultTenantId);

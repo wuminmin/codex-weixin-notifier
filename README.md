@@ -1,6 +1,6 @@
 # CATM 2.0
 
-CATM is a NAS-hosted Streamable HTTP MCP server for durable coding-agent decisions, remote instructions, and completion notifications over Weixin and Feishu. Codex, Claude Code, and opencode connect to one long-running service through Tailscale; no CATM server runs in WSL or on developer laptops.
+CATM is a NAS-hosted Streamable HTTP MCP server for durable coding-agent decisions, remote instructions, and completion notifications over Weixin and Feishu. Codex, Claude Code, and opencode connect to one long-running service through Tailscale or an explicitly configured Cloudflare Tunnel; no CATM server runs in WSL or on developer laptops.
 
 CATM 2.0 is a destructive server-schema upgrade. Initialize it on the NAS as a new deployment. Existing 1.0 state is not imported or deleted automatically.
 
@@ -28,6 +28,20 @@ curl https://your-nas.your-tailnet.ts.net/health
 ```
 
 Compose publishes CATM only on NAS loopback (`127.0.0.1:61937`), uses a named data volume, checks `/health`, and restarts the container unless it was explicitly stopped. Do not use Tailscale Funnel for CATM.
+
+### Optional public Cloudflare endpoint
+
+Public exposure is opt-in. Keep the bearer token enabled, route only `/mcp` and `/health`, disable proxy buffering and caching, and do not publish port `61937` on a LAN or WAN address. CATM can accept more than one HTTPS hostname:
+
+```bash
+docker compose stop catm
+docker compose run --rm catm endpoint add \
+  --url https://mcp.example.com/mcp
+docker compose -f compose.yaml -f compose.cloudflare.yaml up -d --build
+docker compose exec catm catm endpoint list
+```
+
+`compose.cloudflare.yaml` joins the existing external Docker network named `nas-public-gateway`; it does not create a tunnel. Configure that gateway's Nginx and Cloudflare Tunnel to forward `mcp.example.com` to `http://catm:61937`, then verify both the public health response and an authenticated MCP initialization. The SessionBound deployment uses `https://mcp.sessionbound.org/mcp` through its existing wildcard tunnel.
 
 Upgrade with:
 
@@ -115,6 +129,7 @@ Check service health and logs:
 docker compose ps
 docker compose logs --tail=100 catm
 tailscale serve status
+docker compose exec catm catm endpoint list
 ```
 
 Rotate a lost or exposed access token while CATM is stopped:
@@ -135,6 +150,7 @@ Persistent server data is stored in the `catm-data` Docker volume. The service c
 npm ci
 npm test
 docker compose config
+docker compose -f compose.yaml -f compose.cloudflare.yaml config
 docker build -t catm:local .
 ```
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { createAccessToken, hashToken, newConfig, resolveCredential, saveConfig, validateConfig } from "../scripts/lib/catm-config.mjs";
+import { addPublicUrl, createAccessToken, hashToken, newConfig, publicUrls, removePublicUrl, resolveCredential, saveConfig, validateConfig } from "../scripts/lib/catm-config.mjs";
 import { tempEnvironment } from "./helpers.mjs";
 
 test("v2 config fixes the NAS listener and stores only a shared token hash", (t) => {
@@ -24,6 +24,16 @@ test("public URL and destructive schema boundary are strict", () => {
   assert.throws(() => newConfig({ publicUrl: "http://catm.example.ts.net/mcp" }), /HTTPS/u);
   assert.throws(() => newConfig({ publicUrl: "https://catm.example.ts.net/other" }), /\/mcp/u);
   assert.throws(() => validateConfig({ version: 1 }), /fresh NAS deployment/u);
+});
+
+test("multiple public MCP URLs are normalized and keep one required endpoint", () => {
+  const config = newConfig({ publicUrl: "https://catm.example.ts.net/mcp" });
+  assert.equal(addPublicUrl(config, "https://mcp.example.com/mcp"), true);
+  assert.equal(addPublicUrl(config, "https://mcp.example.com/mcp"), false);
+  assert.deepEqual(publicUrls(validateConfig(config)), ["https://catm.example.ts.net/mcp", "https://mcp.example.com/mcp"]);
+  assert.equal(removePublicUrl(config, "https://catm.example.ts.net/mcp"), true);
+  assert.equal(config.server.publicUrl, "https://mcp.example.com/mcp");
+  assert.throws(() => removePublicUrl(config, "https://mcp.example.com/mcp"), /at least one/u);
 });
 
 test("multi-tenant credential isolation remains available internally", () => {

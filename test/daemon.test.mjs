@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -24,9 +25,21 @@ async function eventually(check, timeoutMs = 1000) {
   }
 }
 
+function rawPost(url, headers) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(url, { method: "POST", headers }, (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode));
+    });
+    request.once("error", reject);
+    request.end("{}");
+  });
+}
+
 test("NAS daemon secures HTTP and resumes an active Claude wait from a direct phone reply", async (t) => {
   const env = tempEnvironment(); t.after(env.cleanup);
   const config = newConfig({ publicUrl: "https://catm.example.ts.net/mcp" });
+  config.server.publicUrls.push("https://mcp.sessionbound.org/mcp");
   const token = createAccessToken(config).token;
   const notices = [];
   const daemon = await startDaemon({
@@ -38,10 +51,19 @@ test("NAS daemon secures HTTP and resumes an active Claude wait from a direct ph
     },
   });
   const base = `http://127.0.0.1:${daemon.port}`;
-  const health = await (await fetch(`${base}/health`)).json();
+  const healthResponse = await fetch(`${base}/health`);
+  assert.equal(healthResponse.headers.get("cache-control"), "no-store");
+  const health = await healthResponse.json();
   assert.deepEqual(health, { status: "ready", version: "2.0.0" });
   assert.equal((await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401);
   assert.equal((await fetch(`${base}/mcp`, { method: "POST", headers: { authorization: `Bearer ${token}`, origin: "https://evil.example", "content-type": "application/json" }, body: "{}" })).status, 403);
+  assert.notEqual((await fetch(`${base}/mcp`, { method: "POST", headers: { authorization: `Bearer ${token}`, origin: "https://mcp.sessionbound.org", host: "mcp.sessionbound.org", "content-type": "application/json" }, body: "{}" })).status, 403);
+  const publicFailure = (address) => rawPost(`${base}/mcp`, {
+    authorization: "Bearer invalid", host: "mcp.sessionbound.org", "cf-connecting-ip": address, "content-type": "application/json",
+  });
+  for (let index = 0; index < 20; index += 1) assert.equal(await publicFailure("203.0.113.10"), 401);
+  assert.equal(await publicFailure("203.0.113.10"), 429);
+  assert.equal(await publicFailure("203.0.113.11"), 401);
 
   const clients = await Promise.all(["claude", "codex", "opencode"].map((name) => connect(`${base}/mcp`, token, name)));
   t.after(async () => { await Promise.allSettled(clients.map((client) => client.close())); await daemon.close(); });
