@@ -34,18 +34,17 @@ async function hidden(prompt) {
   });
 }
 
-async function manual(platform) {
-  const label = platform === "lark" ? "Lark" : "Feishu";
+async function manual() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let appId;
-  try { appId = (await rl.question(`${label} App ID: `)).trim(); } finally { rl.close(); }
-  return { appId, appSecret: await hidden(`${label} App Secret (hidden): `) };
+  try { appId = (await rl.question("Feishu App ID: ")).trim(); } finally { rl.close(); }
+  return { appId, appSecret: await hidden("Feishu App Secret (hidden): ") };
 }
 
-async function qr(platform, options = {}) {
+async function qr(options = {}) {
   const registerApp = options.registerApp || lark.registerApp;
   const result = await registerApp({
-    domain: platform === "lark" ? "accounts.larksuite.com" : "accounts.feishu.cn",
+    domain: "accounts.feishu.cn",
     larkDomain: "accounts.larksuite.com", source: "catm", createOnly: true,
     appPreset: { name: "CATM", desc: "CATM author control" },
     addons: { preset: true, scopes: { tenant: ["application:bot.basic_info:read", "im:message.group_at_msg:readonly", "im:message.p2p_msg:readonly", "im:message:send_as_bot"] }, events: { items: { tenant: ["im.message.receive_v1"] } } },
@@ -56,25 +55,24 @@ async function qr(platform, options = {}) {
 
 export async function runSetupFeishu(argv = process.argv.slice(2), options = {}) {
   const args = parseArgs(argv);
-  const platform = String(args.platform || "feishu").toLowerCase();
-  if (!["feishu", "lark"].includes(platform)) throw new Error("--platform must be feishu or lark");
+  if (args.platform) throw new Error("--platform was removed; CATM 2.0 supports Feishu only");
+  if (args.mode && !["manual", "qr"].includes(String(args.mode))) throw new Error("--mode must be manual or qr");
   const loaded = loadConfig(options);
   const tenant = loaded.config.tenants[loaded.config.defaultTenantId];
   if (args.check) {
-    const existing = tenant.channels[platform];
-    if (!existing) throw new Error(`${platform} is not configured`);
-    const client = createFeishuChannel({ ...existing, account: "default", bot: platform });
+    const existing = tenant.channels.feishu;
+    if (!existing) throw new Error("feishu is not configured");
+    const client = createFeishuChannel({ ...existing, account: "default", bot: "feishu" });
     await client.connect(); await client.disconnect();
-    process.stdout.write(`${platform} connection ok.\n`);
+    process.stdout.write("feishu connection ok.\n");
     return existing;
   }
-  const credentials = options.credentials || (args.mode === "qr" ? await qr(platform, options) : await manual(platform));
+  const credentials = options.credentials || (args.mode === "qr" ? await qr(options) : await manual());
   if (!/^cli_[A-Za-z0-9]+$/u.test(credentials.appId || "") || !credentials.appSecret) throw new Error("Invalid app credentials");
-  const channelId = platform;
-  const channel = { type: platform, enabled: true, appId: credentials.appId, appSecret: credentials.appSecret, authorTargets: {} };
-  tenant.channels[channelId] = channel;
+  const channel = { type: "feishu", enabled: true, appId: credentials.appId, appSecret: credentials.appSecret, authorTargets: {} };
+  tenant.channels.feishu = channel;
   saveConfig(loaded.config, { paths: loaded.paths });
-  process.stdout.write(`${platform} saved to ${loaded.paths.configPath}. Publish the app, enable long-connection message events, restart CATM, then run \"catm bind-code\".\n`);
+  process.stdout.write(`feishu saved to ${loaded.paths.configPath}. Publish the app, enable long-connection message events, restart CATM, then run "catm bind-code".\n`);
   return channel;
 }
 

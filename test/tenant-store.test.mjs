@@ -50,13 +50,14 @@ test("different tenant stores cannot resolve each other's identifiers", async (t
   assert.throws(() => second.getSession(session.session_id), /not found/u);
 });
 
-test("a managed session is claimed by the matching MCP sync instead of duplicated", async (t) => {
+test("each new MCP conversation creates an independent session without public tenant fields", async (t) => {
   const env = tempEnvironment(); t.after(env.cleanup);
   const store = new TenantStore({ paths: env.paths, tenantId: "default" });
-  const managed = await store.createManagedSession({ agent: "codex", workspace: "/work", label: "Phone", tmuxName: "catm-test" });
-  const claimed = await sync(store);
-  assert.equal(claimed.session_id, managed.sessionId);
-  assert.equal(store.listSessions().length, 1);
+  const first = await sync(store);
+  const second = await sync(store);
+  assert.notEqual(first.session_id, second.session_id);
+  assert.equal("tenant_id" in first, false);
+  assert.equal(store.listSessions().length, 2);
 });
 
 test("closing a session cancels its pending decisions", async (t) => {

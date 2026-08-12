@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { TenantStore } from "./tenant-store.mjs";
 import { createMobileCommandRouter } from "./mobile-commands.mjs";
-import { managedSessionOperations } from "./managed-sessions.mjs";
 import { createFeishuChannel, feishuReplyConfig, sendFeishuMarkdown } from "./feishu-channel.mjs";
 import { sendWeixinText } from "./channel-notifier.mjs";
 import { readJson, writeJson } from "./atomic-json.mjs";
@@ -109,18 +108,21 @@ async function startFeishu({ config, paths, tenantId, channelId, channel, router
   return { close: () => client.disconnect() };
 }
 
-export async function startChannelServices({ config, paths }) {
+export async function startChannelServices({ config, paths, waitRegistry }) {
   const handles = [];
   for (const [tenantId, tenant] of Object.entries(config.tenants)) {
     if (!tenant.enabled) continue;
     const store = new TenantStore({ paths, tenantId });
-    const ops = managedSessionOperations({ store, workspace: tenant.defaultWorkspace || process.cwd(), health: async () => `CATM ready · tenant ${tenantId} · ${store.listSessions().length} sessions` });
-    const router = createMobileCommandRouter({ store, operations: ops });
+    const router = createMobileCommandRouter({
+      store,
+      waitRegistry,
+      operations: { status: async () => `CATM ready · ${store.listSessions().length} sessions` },
+    });
     for (const [channelId, channel] of Object.entries(tenant.channels || {})) {
       if (channel.enabled === false) continue;
       try {
         if (channel.type === "weixin") handles.push(await startWeixin({ config, paths, tenantId, channelId, channel, router, store }));
-        if (channel.type === "feishu" || channel.type === "lark") handles.push(await startFeishu({ config, paths, tenantId, channelId, channel, router, store }));
+        if (channel.type === "feishu") handles.push(await startFeishu({ config, paths, tenantId, channelId, channel, router, store }));
       } catch (error) {
         process.stderr.write(`[catm] ${channelId} did not start: ${error.message}\n`);
       }

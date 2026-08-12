@@ -27,7 +27,7 @@ export async function sendWeixinText(text, target) {
         item_list: [{ type: 1, text_item: { text } }],
         context_token: target.contextToken,
       },
-      base_info: { channel_version: "2.4.6", bot_agent: "CATM/1.0.0" },
+      base_info: { channel_version: "2.4.6", bot_agent: "CATM/2.0.0" },
     }),
   });
   const body = await response.text();
@@ -42,7 +42,7 @@ export function authorTargets(tenant) {
     for (const target of Object.values(channel.authorTargets || {})) {
       if (target?.enabled === false) continue;
       if (channel.type === "weixin" && target.toUser) targets.push({ channelId, type: "weixin", channelConfig: channel, ...target });
-      if ((channel.type === "feishu" || channel.type === "lark") && target.chatId) targets.push({ channelId, type: channel.type, channelConfig: channel, ...target });
+      if (channel.type === "feishu" && target.chatId) targets.push({ channelId, type: channel.type, channelConfig: channel, ...target });
     }
   }
   return targets;
@@ -65,7 +65,13 @@ export async function fanOutAuthorMessage(tenant, text, options = {}) {
           chatId: target.chatId,
           notifierHome: options.stateDir,
         });
-      results.push({ ok: true, label, messageId: response?.messageId || "" });
+      results.push({
+        ok: true,
+        label,
+        messageId: response?.messageId || "",
+        channel: target.channelId,
+        conversationId: String(target.type === "weixin" ? target.toUser : target.chatId),
+      });
     } catch (error) {
       results.push({ ok: false, label, error: String(error.message || error) });
     }
@@ -86,7 +92,7 @@ export function formatDecisionMessage(decision, session) {
     decision.options.forEach((option, index) => lines.push(`${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`));
   }
   if (decision.recommendation) lines.push("", `Recommendation: ${decision.recommendation}`);
-  lines.push("", `Reply: decide ${decision.shortCode} <answer>`);
+  lines.push("", `Reply with the answer directly. Fallback: decide ${decision.shortCode} <answer>`);
   return lines.join("\n");
 }
 

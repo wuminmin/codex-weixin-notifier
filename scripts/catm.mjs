@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { catmPaths } from "./lib/catm-paths.mjs";
-import { createClientCredential, loadConfig, newConfig, saveConfig } from "./lib/catm-config.mjs";
-import { configureClient, detectedAgents, maskedAgentTemplate, updateClientEndpoint } from "./lib/client-config.mjs";
-import { selectPort } from "./lib/port-selection.mjs";
+import { createAccessToken, loadConfig, newConfig, normalizePublicUrl, saveConfig } from "./lib/catm-config.mjs";
+import { configureClient, detectedAgents, disconnectClient } from "./lib/client-config.mjs";
 import { startDaemon } from "./catm-daemon.mjs";
 import { TenantStore } from "./lib/tenant-store.mjs";
-import { destructiveLegacyCleanup } from "./lib/destructive-cleanup.mjs";
 
-const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TYPES = ["codex", "claude", "opencode"];
 
 function argsOf(argv) {
@@ -29,18 +27,19 @@ function argsOf(argv) {
 }
 
 function usage() {
-  return `CATM 1.0
+  return `CATM 2.0
 
-catm onboard [--port PORT] [--agents detected|all|codex,claude,opencode]
-catm server start
-catm server stop
-catm server rebind --port PORT
-catm agents configure [detected|all|codex,claude,opencode]
-catm agents --print
-catm bind-code
-catm tenant list
-catm channel weixin
-catm channel feishu [--platform feishu|lark]`;
+Server (NAS / Docker):
+  catm init --public-url https://nas.example.ts.net/mcp
+  catm server
+  catm token rotate
+  catm channel weixin
+  catm channel feishu [--mode manual|qr]
+  catm bind-code
+
+Client (WSL / developer machine):
+  catm connect --url https://nas.example.ts.net/mcp [--agents detected|all|codex,claude,opencode]
+  catm disconnect [--agents detected|all|codex,claude,opencode]`;
 }
 
 function selectedTypes(value, options = {}) {
@@ -55,8 +54,7 @@ function lockPid(paths) {
   try { return Number(fs.readFileSync(paths.lockPath, "utf8").trim()); } catch { return 0; }
 }
 
-function daemonRunning(paths) {
-  const pid = lockPid(paths);
+function processAlive(pid) {
   if (!pid) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -69,65 +67,91 @@ function daemonPidIsCatm(pid) {
   } catch { return false; }
 }
 
-async function configureAgents(config, types, options = {}) {
-  const tenant = config.tenants[config.defaultTenantId];
-  const files = [];
-  for (const type of types) {
-    const { token } = createClientCredential(config, type);
-    files.push(configureClient(type, config, token, options));
-  }
-  return files;
+function stopLegacyDaemon(paths) {
+  const pid = lockPid(paths);
+  if (!pid || !processAlive(pid)) return false;
+  if (!daemonPidIsCatm(pid)) throw new Error("Refusing to stop an unverified process from the legacy CATM lock");
+  process.kill(pid, "SIGTERM");
+  return true;
 }
 
-async function onboard(args, options = {}) {
+async function hidden(prompt) {
+  if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== "function") {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try { return (await rl.question(prompt)).trim(); } finally { rl.close(); }
+  }
+  process.stdout.write(prompt);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.setEncoding("utf8");
+  return new Promise((resolve, reject) => {
+    let value = "";
+    const finish = () => { process.stdin.off("data", onData); process.stdin.setRawMode(false); process.stdin.pause(); process.stdout.write("\n"); };
+    const onData = (data) => { for (const char of data) {
+      if (char === "\r" || char === "\n") { finish(); resolve(value.trim()); return; }
+      if (char === "\u0003") { finish(); reject(new Error("Cancelled")); return; }
+      if (char === "\u007f") value = value.slice(0, -1); else value += char;
+    } };
+    process.stdin.on("data", onData);
+  });
+}
+
+async function verifyRemote(url, token, options = {}) {
+  if (options.verifyRemote) return options.verifyRemote(url, token);
+  const client = new Client({ name: "catm-connect", version: "2.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
+  try {
+    await client.connect(transport);
+    const tools = await client.listTools();
+    const names = new Set(tools.tools.map((tool) => tool.name));
+    for (const required of ["sync_session", "request_author_decision", "wait_author_decision", "notify_work_completed"]) {
+      if (!names.has(required)) throw new Error(`remote CATM is missing ${required}`);
+    }
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+async function initialize(args, options = {}) {
   const paths = options.paths || catmPaths(options);
   if (fs.existsSync(paths.configPath)) throw new Error(`CATM is already initialized: ${paths.configPath}`);
-  if (!options.skipCleanup) destructiveLegacyCleanup({ home: options.home, tmpRoot: options.tmpRoot });
-  const selected = await selectPort({ requestedPort: args.port });
-  await new Promise((resolve) => selected.reservation.close(resolve));
-  const config = newConfig({ port: selected.port });
-  const verified = await startDaemon({ config, paths, channels: false });
-  await verified.close();
-  const types = selectedTypes(args.agents || "detected", options);
-  const files = await configureAgents(config, types, options);
+  const config = newConfig({ publicUrl: args["public-url"] });
+  const credential = createAccessToken(config);
   saveConfig(config, { paths });
-  if (options.startBackground !== false) {
-    const child = spawn(process.execPath, [path.join(SCRIPT_DIR, "catm-daemon.mjs")], { detached: true, stdio: "ignore", env: options.env || process.env });
-    child.unref();
-  }
-  process.stdout.write(`CATM initialized at http://127.0.0.1:${selected.port}/mcp\n`);
-  process.stdout.write(`Configured agents: ${types.join(", ") || "none"}\n`);
-  files.forEach((file) => process.stdout.write(`Updated ${file}\n`));
-  return { config, types, files };
+  process.stdout.write(`CATM 2.0 initialized.\nEndpoint: ${config.server.publicUrl}\nAccess token (shown once): ${credential.token}\n`);
+  return { config, token: credential.token };
 }
 
-async function rebind(args, options = {}) {
+async function connect(args, options = {}) {
+  const url = normalizePublicUrl(args.url);
+  const token = options.token || await hidden("CATM access token (hidden): ");
+  if (!token) throw new Error("access token is required");
+  await verifyRemote(url, token, options);
+  const types = selectedTypes(args.agents || "detected", options);
+  if (!types.length) throw new Error("no supported agents detected; pass --agents explicitly");
+  stopLegacyDaemon(options.paths || catmPaths(options));
+  const files = types.map((type) => configureClient(type, url, token, options));
+  process.stdout.write(`Connected ${types.join(", ")} to ${url}\n`);
+  files.forEach((file) => process.stdout.write(`Updated ${file}\n`));
+  return { url, types, files };
+}
+
+function disconnect(args, options = {}) {
+  const types = selectedTypes(args.agents || "all", options);
+  const files = types.map((type) => disconnectClient(type, options)).filter(Boolean);
+  process.stdout.write(`Disconnected CATM from ${types.join(", ")}.\n`);
+  return { types, files };
+}
+
+function rotateToken(options = {}) {
   const paths = options.paths || catmPaths(options);
-  if (daemonRunning(paths)) throw new Error("Stop CATM before rebinding: catm server stop");
-  const { config } = loadConfig({ paths });
-  const selected = await selectPort({ requestedPort: args.port });
-  await new Promise((resolve) => selected.reservation.close(resolve));
-  const previous = config.server.port;
-  config.server.port = selected.port;
-  const verified = await startDaemon({ config, paths, channels: false });
-  await verified.close();
-  const clientHome = options.home || os.homedir();
-  const candidates = [
-    paths.configPath,
-    path.join(clientHome, ".codex", "config.toml"),
-    path.join(clientHome, ".claude.json"),
-    path.join(clientHome, ".config", "opencode", "opencode.json"),
-    path.join(clientHome, ".config", "opencode", "opencode.jsonc"),
-  ];
-  const snapshots = new Map(candidates.filter((file) => fs.existsSync(file)).map((file) => [file, { data: fs.readFileSync(file), mode: fs.statSync(file).mode & 0o777 }]));
-  try {
-    for (const type of TYPES) updateClientEndpoint(type, config, options);
-    saveConfig(config, { paths });
-  } catch (error) {
-    for (const [file, snapshot] of snapshots) { fs.writeFileSync(file, snapshot.data, { mode: snapshot.mode }); fs.chmodSync(file, snapshot.mode); }
-    throw error;
-  }
-  process.stdout.write(`Rebound CATM from ${previous} to ${selected.port}. Start it with: catm server start\n`);
+  const pid = lockPid(paths);
+  if (pid && processAlive(pid)) throw new Error("Stop the CATM service before rotating its access token");
+  const loaded = loadConfig({ paths });
+  const credential = createAccessToken(loaded.config);
+  saveConfig(loaded.config, { paths });
+  process.stdout.write(`Access token rotated (shown once): ${credential.token}\nRestart CATM and reconnect every client.\n`);
+  return credential;
 }
 
 async function main(argv = process.argv.slice(2), options = {}) {
@@ -135,52 +159,23 @@ async function main(argv = process.argv.slice(2), options = {}) {
   const [command, subcommand] = args._;
   const paths = options.paths || catmPaths(options);
   if (!command || command === "help" || args.help) return process.stdout.write(`${usage()}\n`);
-  if (command === "onboard") return onboard(args, options);
-  if (command === "server" && subcommand === "start") return startDaemon({ paths });
-  if (command === "server" && subcommand === "stop") {
-    const pid = lockPid(paths);
-    if (!pid || !daemonRunning(paths)) throw new Error("CATM daemon is not running");
-    if (!daemonPidIsCatm(pid)) throw new Error("Refusing to signal a process that is not CATM");
-    process.kill(pid, "SIGTERM");
-    process.stdout.write("CATM daemon stopping.\n");
-    return;
-  }
-  if (command === "server" && subcommand === "rebind") return rebind(args, options);
-  if (command === "agents" && args.print) {
-    const { config } = loadConfig({ paths });
-    return process.stdout.write(`${maskedAgentTemplate(config)}\n`);
-  }
-  if (command === "agents" && subcommand === "configure") {
-    if (daemonRunning(paths)) throw new Error("Stop CATM before rotating client credentials");
-    const loaded = loadConfig({ paths });
-    const types = selectedTypes(args._[2] || "detected", options);
-    const files = await configureAgents(loaded.config, types, options);
-    saveConfig(loaded.config, { paths });
-    files.forEach((file) => process.stdout.write(`Updated ${file}\n`));
-    return;
-  }
+  if (command === "init") return initialize(args, { ...options, paths });
+  if (command === "server" && !subcommand) return startDaemon({ paths });
+  if (command === "connect") return connect(args, { ...options, paths });
+  if (command === "disconnect") return disconnect(args, { ...options, paths });
+  if (command === "token" && subcommand === "rotate") return rotateToken({ ...options, paths });
   if (command === "bind-code") {
     const { config } = loadConfig({ paths });
     const code = await new TenantStore({ paths, tenantId: config.defaultTenantId }).createBindingCode();
     process.stdout.write(`Binding code: ${code.code}\nExpires: ${code.expiresAt}\n`);
-    return;
-  }
-  if (command === "tenant" && subcommand === "list") {
-    const { config } = loadConfig({ paths });
-    Object.values(config.tenants).forEach((tenant) => process.stdout.write(`${tenant.tenantId}\t${tenant.displayName}\t${tenant.enabled ? "enabled" : "disabled"}\n`));
-    return;
-  }
-  if (command === "cleanup-legacy") {
-    const result = destructiveLegacyCleanup({ home: options.home, tmpRoot: options.tmpRoot });
-    process.stdout.write(`Removed ${result.removed.length} legacy paths${result.hooksRemoved ? " and legacy hooks" : ""}.\n`);
-    return result;
+    return code;
   }
   if (command === "channel" && subcommand === "weixin") return (await import("./pair-weixin.mjs")).runPairWeixin(argv.slice(2), { paths });
   if (command === "channel" && subcommand === "feishu") return (await import("./setup-feishu.mjs")).runSetupFeishu(argv.slice(2), { paths });
   throw new Error(`Unknown command.\n${usage()}`);
 }
 
-export { daemonPidIsCatm, main, onboard, rebind, selectedTypes };
+export { daemonPidIsCatm, initialize, connect, disconnect, main, rotateToken, selectedTypes, stopLegacyDaemon };
 
 function isMainModule() {
   if (!process.argv[1]) return false;

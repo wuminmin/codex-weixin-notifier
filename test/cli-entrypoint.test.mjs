@@ -17,8 +17,9 @@ test("catm executes when invoked through the installed extensionless symlink", (
   const result = spawnSync(link, ["help"], { encoding: "utf8" });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^CATM 1\.0$/mu);
-  assert.match(result.stdout, /^catm onboard /mu);
+  assert.match(result.stdout, /^CATM 2\.0$/mu);
+  assert.match(result.stdout, /^  catm init /mu);
+  assert.match(result.stdout, /^  catm connect /mu);
 });
 
 test("CATM recognizes its daemon when Node uses an absolute executable path", (t) => {

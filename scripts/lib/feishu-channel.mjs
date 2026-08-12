@@ -14,18 +14,16 @@ function loggerLevel(config, sdk = lark) {
 }
 
 export function feishuPlatform(config = {}) {
-  return String(config.platform || "feishu").toLowerCase() === "lark" ? "lark" : "feishu";
+  return "feishu";
 }
 
 export function feishuPlatformLabel(config = {}) {
-  return feishuPlatform(config) === "lark" ? "Lark" : "Feishu";
+  return "Feishu";
 }
 
 export function feishuDomain(config = {}, sdk = lark) {
   if (config.domain) return config.domain;
-  return feishuPlatform(config) === "lark"
-    ? sdk.Domain?.Lark
-    : sdk.Domain?.Feishu;
+  return sdk.Domain?.Feishu;
 }
 
 export function createFeishuChannel(config, options = {}) {

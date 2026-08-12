@@ -87,10 +87,6 @@ export class TenantStore {
       if (input.session_id) {
         session = state.sessions[String(input.session_id).toUpperCase()];
         if (!session || session.status === "closed") throw new Error("session not found");
-      } else {
-        session = Object.values(state.sessions)
-          .filter((item) => item.managed && !item.mcpAttached && item.status !== "closed" && item.agent === agent && item.workspace === workspace)
-          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
       }
       if (!session) {
         const sessionId = `S${++state.counters.session}`;
@@ -109,7 +105,6 @@ export class TenantStore {
         state.sessions[sessionId] = session;
         state.inbox[sessionId] = [];
       }
-      if (session.managed) session.mcpAttached = true;
       if (session.agent !== agent) throw new Error("session agent cannot change");
       if (session.status === "idle" && status !== "idle") session.workCycle += 1;
       session.workspace = workspace;
@@ -133,7 +128,6 @@ export class TenantStore {
         }
       }
       return {
-        tenant_id: this.tenantId,
         session_id: session.sessionId,
         work_cycle_id: `W${session.workCycle}`,
         status: session.status,
@@ -146,43 +140,6 @@ export class TenantStore {
         })),
         pending_decisions: pendingDecisions(state, session.sessionId).length,
       };
-    });
-  }
-
-  async createManagedSession({ agent, workspace, label, tmuxName }) {
-    return this.mutate((state) => {
-      const normalizedAgent = String(agent || "").toLowerCase();
-      if (!AGENTS.has(normalizedAgent)) throw new Error("agent must be codex, claude, or opencode");
-      const sessionId = `S${++state.counters.session}`;
-      const session = {
-        tenantId: this.tenantId,
-        sessionId,
-        agent: normalizedAgent,
-        workspace: cleanText(workspace, 4096, "workspace"),
-        label: cleanText(label, 160, "label"),
-        status: "queued",
-        stage: "Managed session starting",
-        workCycle: 1,
-        managed: true,
-        tmuxName: cleanText(tmuxName, 200, "tmux_name"),
-        createdAt: now(),
-        lastSyncAt: now(),
-      };
-      state.sessions[sessionId] = session;
-      state.inbox[sessionId] = [];
-      return session;
-    });
-  }
-
-  async markInstructionAcknowledged(sessionId, instructionId) {
-    return this.mutate((state) => {
-      const inbox = state.inbox[String(sessionId || "").toUpperCase()] || [];
-      const item = inbox.find((entry) => entry.instructionId === instructionId);
-      if (!item) throw new Error("instruction not found");
-      item.status = "acknowledged";
-      item.deliveredAt ||= now();
-      item.acknowledgedAt = now();
-      return item;
     });
   }
 
@@ -303,6 +260,11 @@ export class TenantStore {
       if (!decision) throw new Error("decision not found");
       decision.delivery = delivery;
       decision.deliveredAt = now();
+      for (const item of delivery || []) {
+        if (!item.ok || !item.channel || !item.conversationId) continue;
+        const key = `${item.channel}:${item.conversationId}`;
+        state.conversations[key] = { ...(state.conversations[key] || {}), pendingDecisionId: decision.decisionId, updatedAt: now() };
+      }
       return decision;
     });
   }
@@ -318,6 +280,13 @@ export class TenantStore {
   listDecisions(sessionId, status = "pending") {
     this.getSession(sessionId);
     return Object.values(this.read().decisions).filter((item) => item.sessionId === String(sessionId).toUpperCase() && (!status || item.status === status));
+  }
+
+  pendingDecisionForConversation(conversationKey) {
+    const state = this.read();
+    const decisionId = state.conversations[String(conversationKey || "")]?.pendingDecisionId;
+    const decision = decisionId ? state.decisions[decisionId] : null;
+    return decision?.status === "pending" ? decision : null;
   }
 
   async answerDecision(idOrCode, answer, source = {}) {
@@ -341,6 +310,9 @@ export class TenantStore {
         conversationId: String(source.conversationId || ""),
         answeredAt: now(),
       };
+      for (const conversation of Object.values(state.conversations)) {
+        if (conversation.pendingDecisionId === decision.decisionId) delete conversation.pendingDecisionId;
+      }
       const session = state.sessions[decision.sessionId];
       if (session && pendingDecisions(state, session.sessionId).length === 0) session.status = "working";
       return decision;
@@ -408,7 +380,7 @@ export class TenantStore {
     return this.mutate((state) => {
       const id = String(sessionId || "").toUpperCase();
       if (!state.sessions[id] || state.sessions[id].status === "closed") throw new Error("session not found");
-      state.conversations[conversationKey] = { sessionId: id, updatedAt: now() };
+      state.conversations[conversationKey] = { ...(state.conversations[conversationKey] || {}), sessionId: id, updatedAt: now() };
       return id;
     });
   }
@@ -420,7 +392,10 @@ export class TenantStore {
   async clearCurrentSession(conversationKey, sessionId = "") {
     return this.mutate((state) => {
       const selected = state.conversations[conversationKey]?.sessionId || "";
-      if (!sessionId || selected === String(sessionId).toUpperCase()) delete state.conversations[conversationKey];
+      if (!sessionId || selected === String(sessionId).toUpperCase()) {
+        delete state.conversations[conversationKey]?.sessionId;
+        if (state.conversations[conversationKey] && !Object.keys(state.conversations[conversationKey]).some((key) => key !== "updatedAt")) delete state.conversations[conversationKey];
+      }
       return selected;
     });
   }

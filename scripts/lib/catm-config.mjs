@@ -5,19 +5,36 @@ import { catmPaths } from "./catm-paths.mjs";
 import { readJson, writeJson, ensurePrivateDir } from "./atomic-json.mjs";
 
 const TENANT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
-const CLIENT_TYPES = new Set(["codex", "claude", "opencode"]);
+export const SERVER_HOST = "0.0.0.0";
+export const SERVER_PORT = 61937;
+export const DEFAULT_CREDENTIAL_ID = "shared-access";
 
 export function validateTenantId(value) {
   if (!TENANT_ID.test(String(value || ""))) throw new Error("tenant_id must be a lowercase slug of at most 64 characters");
   return String(value);
 }
 
-export function newConfig({ tenantId = "default", tenantName = "Default", host = "127.0.0.1", port } = {}) {
+export function normalizePublicUrl(value) {
+  let url;
+  try { url = new URL(String(value || "")); }
+  catch { throw new Error("public URL must be a valid HTTPS URL ending in /mcp"); }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/mcp") {
+    throw new Error("public URL must be an HTTPS origin followed by /mcp, without credentials, query, or fragment");
+  }
+  return url.toString().replace(/\/$/u, "");
+}
+
+export function newConfig({ tenantId = "default", tenantName = "Default", publicUrl } = {}) {
   const id = validateTenantId(tenantId);
-  if (!Number.isInteger(port) || port < 49152 || port > 65535) throw new Error("server port must be in 49152..65535");
   return {
-    version: 1,
-    server: { host, port, maxBodyBytes: 262_144, maxConnections: 128 },
+    version: 2,
+    server: {
+      host: SERVER_HOST,
+      port: SERVER_PORT,
+      publicUrl: normalizePublicUrl(publicUrl),
+      maxBodyBytes: 262_144,
+      maxConnections: 128,
+    },
     defaultTenantId: id,
     tenants: {
       [id]: {
@@ -34,9 +51,11 @@ export function newConfig({ tenantId = "default", tenantName = "Default", host =
 }
 
 export function validateConfig(config) {
-  if (!config || config.version !== 1) throw new Error("CATM 1.0 requires config schema version 1; run `catm onboard`");
-  if (config.server?.host !== "127.0.0.1") throw new Error("CATM server.host must be 127.0.0.1");
-  if (!Number.isInteger(config.server?.port) || config.server.port < 49152 || config.server.port > 65535) throw new Error("CATM server.port must be in 49152..65535");
+  if (!config || config.version !== 2) throw new Error("CATM 2.0 requires config schema version 2; initialize a fresh NAS deployment with `catm init`");
+  if (config.server?.host !== SERVER_HOST || config.server?.port !== SERVER_PORT) {
+    throw new Error(`CATM server must listen on ${SERVER_HOST}:${SERVER_PORT}`);
+  }
+  config.server.publicUrl = normalizePublicUrl(config.server.publicUrl);
   const ids = Object.keys(config.tenants || {});
   if (ids.length < 1) throw new Error("CATM config requires at least one tenant");
   const id = validateTenantId(config.defaultTenantId);
@@ -65,17 +84,15 @@ export function hashToken(token) {
   return crypto.createHash("sha256").update(String(token)).digest("hex");
 }
 
-export function createClientCredential(config, clientType, tenantId = config.defaultTenantId) {
-  if (!CLIENT_TYPES.has(clientType)) throw new Error(`Unsupported MCP client type: ${clientType}`);
+export function createAccessToken(config, tenantId = config.defaultTenantId, credentialId = DEFAULT_CREDENTIAL_ID) {
   validateTenantId(tenantId);
   const tenant = config.tenants[tenantId];
   if (!tenant?.enabled) throw new Error(`tenant not found: ${tenantId}`);
   const token = crypto.randomBytes(32).toString("base64url");
-  const credentialId = `${clientType}-local`;
+  tenant.clientCredentials ||= {};
   tenant.clientCredentials[credentialId] = {
     credentialId,
     tenantId,
-    clientType,
     tokenHash: hashToken(token),
     enabled: true,
     createdAt: new Date().toISOString(),

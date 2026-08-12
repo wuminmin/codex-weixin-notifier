@@ -1,14 +1,14 @@
 {
   "name": "coding-agent-task-monitor",
-  "version": "1.0.0",
-  "description": "Shared tenant-scoped MCP server for author decisions and coding-agent session control over Weixin, Feishu, and Lark.",
+  "version": "2.0.0",
+  "description": "NAS-hosted MCP server for durable coding-agent decisions and remote author control over Weixin and Feishu.",
   "license": "MIT",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "test": "node --test",
-    "start": "node scripts/catm.mjs server start"
+    "start": "node scripts/catm.mjs server"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.71.1",

@@ -1,15 +1,15 @@
 {
   "name": "coding-agent-task-monitor",
-  "version": "1.0.0",
-  "description": "Run one tenant-scoped MCP server for author decisions and coding-agent session control.",
+  "version": "2.0.0",
+  "description": "Run CATM on a NAS for durable author decisions and remote coding-agent control.",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "CATM Author Control",
-    "shortDescription": "Shared MCP session control over Weixin, Feishu, and Lark.",
-    "longDescription": "Runs one local tenant-scoped MCP daemon for coding-agent sessions, author decisions, instruction inboxes, and completion notifications.",
+    "shortDescription": "NAS-hosted MCP decisions over Weixin and Feishu.",
+    "longDescription": "Runs one durable NAS-hosted MCP service for coding-agent sessions, author decisions, remote instructions, and completion notifications.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [
@@ -19,10 +19,10 @@
       "Author Decisions"
     ],
     "defaultPrompt": [
-      "Configure the CATM shared MCP daemon.",
+      "Deploy the CATM MCP service on my NAS with Docker Compose.",
+      "Connect Codex, Claude Code, and opencode to the remote CATM endpoint.",
       "Bind my author identity on Weixin or Feishu.",
-      "Configure Codex, Claude Code, and opencode MCP clients.",
-      "Show controllable coding-agent sessions."
+      "Diagnose a CATM author decision that did not resume an agent."
     ],
     "brandColor": "#18A058"
   }
