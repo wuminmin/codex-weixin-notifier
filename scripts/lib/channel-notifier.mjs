@@ -79,25 +79,6 @@ export async function fanOutAuthorMessage(tenant, text, options = {}) {
   return results;
 }
 
-export function formatDecisionMessage(decision, session) {
-  const lines = [
-    `Author decision ${decision.shortCode}`,
-    `Agent: ${session.agent} · Session: ${decision.sessionId} · Work cycle: W${session.workCycle}`,
-    `Workspace: ${session.workspace}`,
-    `Task: ${session.label}`,
-    "",
-    decision.question,
-  ];
-  if (decision.context) lines.push("", `Context: ${decision.context}`);
-  if (decision.options.length) {
-    lines.push("");
-    decision.options.forEach((option, index) => lines.push(`${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`));
-  }
-  if (decision.recommendation) lines.push("", `Recommendation: ${decision.recommendation}`);
-  lines.push("", `Reply with the answer directly. Fallback: decide ${decision.shortCode} <answer>`);
-  return lines.join("\n");
-}
-
 export function formatCompletionMessage(completion, session) {
   return [
     `Agent: ${session.agent} · Session: ${session.sessionId} · Work cycle: ${completion.workCycleId}`,

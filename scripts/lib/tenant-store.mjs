@@ -110,35 +110,12 @@ export class TenantStore {
       session.workspace = workspace;
       session.label = label;
       session.stage = stage;
-      session.status = pendingDecisions(state, session.sessionId).length > 0 && status !== "idle" ? "waiting_author" : status;
+      session.status = status;
       session.lastSyncAt = now();
-      const ack = new Set((input.acknowledged_instruction_ids || []).map(String));
-      const inbox = state.inbox[session.sessionId] || [];
-      for (const item of inbox) {
-        if (ack.has(item.instructionId) && item.status !== "acknowledged") {
-          item.status = "acknowledged";
-          item.acknowledgedAt = now();
-        }
-      }
-      const deliver = inbox.filter((item) => item.status !== "acknowledged");
-      for (const item of deliver) {
-        if (item.status === "queued") {
-          item.status = "delivered";
-          item.deliveredAt = now();
-        }
-      }
       return {
         session_id: session.sessionId,
         work_cycle_id: `W${session.workCycle}`,
         status: session.status,
-        instructions: deliver.map((item) => ({
-          instruction_id: item.instructionId,
-          sequence: item.sequence,
-          text: item.text,
-          created_at: item.createdAt,
-          delivery_status: item.status,
-        })),
-        pending_decisions: pendingDecisions(state, session.sessionId).length,
       };
     });
   }
@@ -324,7 +301,6 @@ export class TenantStore {
       const sessionId = String(input.session_id || "").toUpperCase();
       const session = state.sessions[sessionId];
       if (!session || session.status === "closed") throw new Error("session not found");
-      if (pendingDecisions(state, sessionId).length > 0) throw new Error("cannot complete work while author decisions are pending");
       const expected = `W${session.workCycle}`;
       if (String(input.work_cycle_id || "").toUpperCase() !== expected) throw new Error(`work_cycle_id must be ${expected}`);
       const key = `${sessionId}:${expected}`;
@@ -340,7 +316,7 @@ export class TenantStore {
       };
       state.completions[key] = completion;
       session.status = "idle";
-      session.stage = "Waiting for more instructions";
+      session.stage = "Waiting for the next work cycle";
       session.lastSyncAt = now();
       return completion;
     });

@@ -14,7 +14,6 @@ import { assertPrivateConfig, loadConfig, publicUrls, resolveCredential } from "
 import { ensurePrivateDir } from "./lib/atomic-json.mjs";
 import { createToolContext, MCP_INSTRUCTIONS } from "./lib/mcp-tools.mjs";
 import { startChannelServices } from "./lib/channel-service.mjs";
-import { DecisionWaitRegistry } from "./lib/decision-waits.mjs";
 
 function jsonRpcError(res, status, message) {
   res.status(status).json({ jsonrpc: "2.0", error: { code: -32000, message }, id: null });
@@ -76,7 +75,7 @@ function acquireInstanceLock(lockPath) {
   }
 }
 
-export function createCatmApp({ config, paths, notifier, waitRegistry = new DecisionWaitRegistry(), waitHeartbeatMs, waitPollMs } = {}) {
+export function createCatmApp({ config, paths, notifier } = {}) {
   const app = express();
   const transports = new Map();
   const authFailures = new Map();
@@ -119,7 +118,7 @@ export function createCatmApp({ config, paths, notifier, waitRegistry = new Deci
         },
       });
       const server = new McpServer({ name: "catm", version: "2.0.0" }, { capabilities: { logging: {} }, instructions: MCP_INSTRUCTIONS });
-      createToolContext({ mcpServer: server, config, paths, credential: req.catmCredential, notifier, waitRegistry, waitHeartbeatMs, waitPollMs });
+      createToolContext({ mcpServer: server, config, paths, credential: req.catmCredential, notifier });
       entry = { transport, server, credentialId: req.catmCredential.credentialId, sessionId: "" };
       transport.onclose = () => { if (entry.sessionId) transports.delete(entry.sessionId); };
       await server.connect(transport);
@@ -146,7 +145,7 @@ export function createCatmApp({ config, paths, notifier, waitRegistry = new Deci
     if (error?.type === "entity.too.large" || error?.status === 413) return res.status(413).json({ error: "request body too large" });
     return next(error);
   });
-  return { app, transports, waitRegistry };
+  return { app, transports };
 }
 
 export async function startDaemon(options = {}) {
@@ -154,14 +153,10 @@ export async function startDaemon(options = {}) {
   const loaded = options.config ? { config: options.config, paths } : loadConfig({ paths });
   if (!options.config) assertPrivateConfig(paths.configPath);
   const releaseLock = acquireInstanceLock(paths.lockPath);
-  const waitRegistry = options.waitRegistry || new DecisionWaitRegistry();
   const { app, transports } = createCatmApp({
     config: loaded.config,
     paths,
     notifier: options.notifier,
-    waitRegistry,
-    waitHeartbeatMs: options.waitHeartbeatMs,
-    waitPollMs: options.waitPollMs,
   });
   const { host, port } = loaded.config.server;
   const listenHost = options.listenHost || host;
@@ -173,7 +168,7 @@ export async function startDaemon(options = {}) {
     releaseLock();
     throw error;
   });
-  const channels = options.channels === false ? { close: async () => {} } : await startChannelServices({ config: loaded.config, paths, waitRegistry }).catch((error) => {
+  const channels = options.channels === false ? { close: async () => {} } : await startChannelServices({ config: loaded.config, paths }).catch((error) => {
     process.stderr.write(`[catm] channel startup failed: ${error.message}\n`);
     return { close: async () => {} };
   });
@@ -198,7 +193,7 @@ export async function startDaemon(options = {}) {
   process.once("SIGTERM", onSignal);
   const actualPort = Number(httpServer.address()?.port || listenPort);
   process.stdout.write(`CATM 2.0 ready internally at http://127.0.0.1:${actualPort}/mcp\nPublic endpoints: ${publicUrls(loaded.config).join(", ")}\n`);
-  return { httpServer, close, host: listenHost, port: actualPort, waitRegistry };
+  return { httpServer, close, host: listenHost, port: actualPort };
 }
 
 if (process.argv[1]?.endsWith("catm-daemon.mjs")) {

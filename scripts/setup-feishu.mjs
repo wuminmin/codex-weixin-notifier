@@ -46,7 +46,7 @@ async function qr(options = {}) {
   const result = await registerApp({
     domain: "accounts.feishu.cn",
     larkDomain: "accounts.larksuite.com", source: "catm", createOnly: true,
-    appPreset: { name: "CATM", desc: "CATM author control" },
+    appPreset: { name: "CATM", desc: "CATM completion notifications" },
     addons: { preset: true, scopes: { tenant: ["application:bot.basic_info:read", "im:message.group_at_msg:readonly", "im:message.p2p_msg:readonly", "im:message:send_as_bot"] }, events: { items: { tenant: ["im.message.receive_v1"] } } },
     onQRCodeReady(info) { process.stdout.write(`${info.url}\n`); qrcode.generate(info.url, { small: true }); },
   });

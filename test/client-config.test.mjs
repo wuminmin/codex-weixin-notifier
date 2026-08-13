@@ -7,18 +7,19 @@ import { tempEnvironment } from "./helpers.mjs";
 
 const URL = "https://catm.example.ts.net/mcp";
 
-test("all clients share one remote URL and token with long waits", (t) => {
+test("all clients share one remote URL and notification-only instructions", (t) => {
   const env = tempEnvironment(); t.after(env.cleanup);
   for (const type of ["codex", "claude", "opencode"]) configureClient(type, URL, "shared-token", { home: env.home });
   const codex = fs.readFileSync(path.join(env.home, ".codex", "config.toml"), "utf8");
   const claude = JSON.parse(fs.readFileSync(path.join(env.home, ".claude.json"), "utf8"));
   const opencode = JSON.parse(fs.readFileSync(path.join(env.home, ".config", "opencode", "opencode.json"), "utf8"));
-  assert.match(codex, /tool_timeout_sec = 21630/u);
-  assert.equal(claude.mcpServers.catm.timeout, 21_630_000);
-  assert.equal(opencode.mcp.servers.catm.timeout.execution, 21_630_000);
+  assert.match(codex, /tool_timeout_sec = 60/u);
+  assert.equal(claude.mcpServers.catm.timeout, 60_000);
+  assert.equal(opencode.mcp.servers.catm.timeout.execution, 60_000);
   assert.ok([codex, JSON.stringify(claude), JSON.stringify(opencode)].every((text) => text.includes(URL) && text.includes("shared-token")));
   const prompt = fs.readFileSync(path.join(env.home, ".claude", "CLAUDE.md"), "utf8");
-  assert.match(prompt, /keep one `wait_author_decision` call active/u);
+  assert.match(prompt, /CATM is notification-only/u);
+  assert.doesNotMatch(prompt, /request_author_decision|wait_author_decision/u);
   assert.match(prompt, /exact complete user-visible final response/u);
   assert.match(prompt, /same response to the user without edits/u);
 });

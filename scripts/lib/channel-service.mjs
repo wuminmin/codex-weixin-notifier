@@ -108,15 +108,13 @@ async function startFeishu({ config, paths, tenantId, channelId, channel, router
   return { close: () => client.disconnect() };
 }
 
-export async function startChannelServices({ config, paths, waitRegistry }) {
+export async function startChannelServices({ config, paths }) {
   const handles = [];
   for (const [tenantId, tenant] of Object.entries(config.tenants)) {
     if (!tenant.enabled) continue;
     const store = new TenantStore({ paths, tenantId });
     const router = createMobileCommandRouter({
       store,
-      waitRegistry,
-      operations: { status: async () => `CATM ready · ${store.listSessions().length} sessions` },
     });
     for (const [channelId, channel] of Object.entries(tenant.channels || {})) {
       if (channel.enabled === false) continue;

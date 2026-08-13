@@ -1,6 +1,6 @@
 # CATM 2.0
 
-CATM is a NAS-hosted Streamable HTTP MCP server for durable coding-agent decisions, remote instructions, and completion notifications over Weixin and Feishu. Codex, Claude Code, and opencode connect to one long-running service through Tailscale or an explicitly configured Cloudflare Tunnel; no CATM server runs in WSL or on developer laptops.
+CATM is a NAS-hosted Streamable HTTP MCP server for coding-agent completion notifications over Weixin and Feishu. Codex, Claude Code, and opencode connect to one long-running service through Tailscale or an explicitly configured Cloudflare Tunnel; no CATM server runs in WSL or on developer laptops.
 
 CATM 2.0 is a destructive server-schema upgrade. Initialize it on the NAS as a new deployment. Existing 1.0 state is not imported or deleted automatically.
 
@@ -88,38 +88,22 @@ docker compose exec catm catm bind-code
 
 Send `bind <code>` to the bot from the author account. Binding codes expire after 15 minutes.
 
-Phone commands are intentionally small:
+The phone channel is notification-only after binding. Its sole accepted setup command is:
 
 | Command | Behavior |
 |---|---|
-| `sessions` | List sessions, states, inbox counts, and pending-decision counts |
-| `use S12` | Select a session for ordinary-text instructions |
-| `send S12 <text>` | Queue an instruction for one session |
-| `decide 004 <answer>` | Explicitly answer a decision by code |
-| `close S12` | Close a session and cancel its pending decisions |
-| `status` | Show CATM health |
 | `bind <code>` | Bind the author account |
-| `help` | Show commands |
 
-When CATM sends a decision, reply with the answer directly. CATM associates the conversation with the most recently delivered pending decision and confirms one of two outcomes:
+After binding, inbound text is silently ignored. CATM never records a phone reply as a decision or remote instruction. Ask and answer questions in the active Codex, Claude Code, or opencode conversation instead.
 
-- `Claude wait is active and will continue`: the active `wait_author_decision` call was signalled immediately.
-- `No active Claude wait; reopen Claude to continue`: the answer is safely stored, but MCP cannot wake an agent whose tool call already ended.
+## Notification behavior
 
-`decide <code> <answer>` remains available when you need to identify a decision explicitly. Invalid closed-choice answers leave the decision pending and return an error.
-
-## Decision durability
-
-Agents use four MCP tools:
+Agents use two MCP tools:
 
 - `sync_session`
-- `request_author_decision`
-- `wait_author_decision`
 - `notify_work_completed`
 
-An active wait sends a protocol heartbeat every 15 seconds, rechecks persistent state every five seconds, and is signalled immediately after a phone answer is committed. A timeout returns `wait_status: pending`; the decision remains answerable. A server restart preserves decisions and answers but cannot restore the caller's old HTTP request.
-
-Remote instructions use at-least-once delivery. They are returned by `sync_session` until the agent acknowledges their instruction ids on a later sync.
+`sync_session` registers the agent session and maintains its work-cycle identity. CATM does not collect author decisions or deliver remote instructions. When input is required, the agent asks in its active conversation.
 
 Completion notifications prepend the agent type, session id, work-cycle id, workspace, and task label so one author bot can distinguish multiple agents and multiple working directories. The remaining notification body is the agent's exact final user-visible response. Agents pass that response unchanged in `notify_work_completed.summary`; `verification` is retained as internal metadata and is not rendered.
 

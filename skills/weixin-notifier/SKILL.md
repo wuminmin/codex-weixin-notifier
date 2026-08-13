@@ -1,11 +1,11 @@
 ---
 name: weixin-notifier
-description: Configure and test the CATM 2.0 NAS-hosted MCP service, remote coding-agent clients, Weixin or Feishu author channels, direct decision replies, and durable waits.
+description: Configure and test the CATM 2.0 NAS-hosted MCP service, remote coding-agent clients, and notification-only Weixin or Feishu author channels.
 ---
 
-# CATM 2.0 NAS author control
+# CATM 2.0 NAS notifications
 
-Use this skill for NAS deployment, remote MCP client connection, author-channel pairing, decision delivery, direct phone replies, and completion delivery.
+Use this skill for NAS deployment, remote MCP client connection, author-channel pairing, and completion delivery.
 
 ## Invariants
 
@@ -15,8 +15,8 @@ Use this skill for NAS deployment, remote MCP client connection, author-channel 
 - Server config is schema v2 and lives in the Docker data volume. Do not migrate v1 state automatically.
 - Tenant isolation remains internal. Do not ask MCP callers or normal operators to provide tenant ids.
 - A session is the only user-visible unit. Do not introduce tasks, hooks, pollers, tmux-managed sessions, or stdio MCP.
-- Explicit control commands are English. Other text is either a direct decision answer or a remote instruction.
-- A stored answer survives disconnects and service restarts, but CATM cannot wake an agent whose MCP wait call has already ended.
+- Phone channels are notification-only after binding. Ignore inbound text without replying and never turn it into a decision or remote instruction.
+- CATM does not expose decision or wait tools. Agents ask for input in their active conversation.
 
 ## Deployment and client commands
 
@@ -46,18 +46,14 @@ docker compose restart catm
 docker compose exec catm catm bind-code
 ```
 
-The author sends `bind <code>` from the phone channel. Phone commands are `sessions`, `use S12`, `send S12 <text>`, `decide ABC <answer>`, `close S12`, `status`, `bind <code>`, and `help`.
+The author sends `bind <code>` from the phone channel. This is the only accepted phone command and exists solely to establish the notification target.
 
-When a decision notification is the latest pending decision for that phone conversation, ordinary text answers it directly. The bot must confirm whether an active Claude wait was resumed or whether the agent must be reopened. Use `decide <code> <answer>` to target a decision explicitly.
+After binding, ordinary phone text is silently ignored. The bot sends completion notifications but does not reply to decisions or commands.
 
 ## MCP behavior and diagnosis
 
-Agents call `sync_session` at work start, around major stages and decisions, after verification, before completion, and about every five minutes. Each author question gets a separate `request_author_decision` and idempotency key, followed by one active `wait_author_decision`. Before the final answer, the agent drafts the exact complete user-visible response, calls `notify_work_completed` once per returned `work_cycle_id` with that response unchanged in `summary`, and then sends the same response to the user without edits. CATM prepends an identity header containing the agent type, session id, work-cycle id, workspace, and task label. `verification` remains stored internal metadata and is not rendered in the author notification.
+Agents call `sync_session` at work start, around major stages, after verification, before completion, and about every five minutes. When author input is required, ask in the active agent conversation. Before the final answer, the agent drafts the exact complete user-visible response, calls `notify_work_completed` once per returned `work_cycle_id` with that response unchanged in `summary`, and then sends the same response to the user without edits. CATM prepends an identity header containing the agent type, session id, work-cycle id, workspace, and task label. `verification` remains stored internal metadata and is not rendered in the author notification.
 
-An active wait emits a heartbeat every 15 seconds and polls durable state every five seconds. A timeout returns `pending`, not an invented answer. After a phone answer, verify all three layers without exposing content or secrets:
-
-1. The decision status is `answered` in the tenant registry.
-2. The phone received either the active-wait or reopen-agent confirmation.
-3. If the wait was active, the tool returned `wait_status: answered`.
+Verify that the remote MCP catalog contains only `sync_session` and `notify_work_completed`, that a completion reaches every enabled target, and that ordinary inbound text produces no reply or stored instruction.
 
 For operations, check `docker compose ps`, `/health`, `docker compose logs`, and `tailscale serve status`. Verify the NAS host publishes CATM itself only on loopback. For an explicitly requested Cloudflare endpoint, also verify the public gateway allows only `/mcp` and `/health`, preserves streaming, requires the CATM bearer token on `/mcp`, and returns 404 for unrelated paths.
