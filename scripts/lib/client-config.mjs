@@ -13,7 +13,9 @@ const PROMPT = `${PROMPT_START}
 
 Use the configured \`catm\` MCP server for this coding session. CATM is notification-only: it does not collect author decisions or remote instructions. Call \`sync_session\` when work begins, after major stages, after verification, before completion, and about every five minutes during continuous work. Keep the returned \`session_id\` and \`work_cycle_id\` for this conversation.
 
-When progress requires author input, ask in the active agent conversation. Before final delivery, draft the exact complete user-visible final response, call \`notify_work_completed\` exactly once for the current work cycle with that response unchanged in \`summary\`, then send the same response to the user without edits. The server adds the agent, session, work-cycle, workspace, and task identity header; do not add that header to \`summary\`. The optional \`verification\` field is internal metadata and is not rendered in the author notification. Never send credentials, secrets, full logs, or unnecessary source text through CATM.
+Call \`notify_author\` whenever a proactive progress update, warning, or other useful message should reach the author. It is non-idempotent and may be called any number of times in one work cycle; every call sends a separate notification without changing the session status.
+
+When progress requires author input, ask in the active agent conversation. Before final delivery, draft the exact complete user-visible final response, call \`notify_work_completed\` with that response unchanged in \`summary\`, then send the same response to the user without edits. The server adds the agent, session, work-cycle, workspace, and task identity header; do not add that header to \`summary\`. The optional \`verification\` field is internal metadata and is not rendered in the author notification. Never send credentials, secrets, full logs, or unnecessary source text through CATM.
 ${PROMPT_END}`;
 
 function writePrivateText(file, text) {

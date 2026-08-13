@@ -107,7 +107,7 @@ async function verifyRemote(url, token, options = {}) {
     await client.connect(transport);
     const tools = await client.listTools();
     const names = new Set(tools.tools.map((tool) => tool.name));
-    for (const required of ["sync_session", "notify_work_completed"]) {
+    for (const required of ["sync_session", "notify_author", "notify_work_completed"]) {
       if (!names.has(required)) throw new Error(`remote CATM is missing ${required}`);
     }
     for (const removed of ["request_author_decision", "wait_author_decision"]) {

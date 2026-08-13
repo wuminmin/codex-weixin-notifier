@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatCompletionMessage } from "../scripts/lib/channel-notifier.mjs";
+import { formatAuthorNotification, formatCompletionMessage } from "../scripts/lib/channel-notifier.mjs";
 
 const session = {
   agent: "codex",
@@ -27,4 +27,18 @@ test("completion notifications prepend identity and preserve the final response 
   ].join("\n"));
   assert.doesNotMatch(message, /internal only|Verification:|Work completed/u);
   assert.ok(message.endsWith(finalResponse));
+});
+
+test("proactive notifications prepend identity and preserve the message verbatim", () => {
+  const notification = "Build is still running.\nSecond update.";
+  const message = formatAuthorNotification({ workCycleId: "W3", message: notification }, session);
+
+  assert.equal(message, [
+    "Agent: codex · Session: S7 · Work cycle: W3",
+    "Workspace: /work/one",
+    "Task: Fix notifier",
+    "",
+    notification,
+  ].join("\n"));
+  assert.ok(message.endsWith(notification));
 });

@@ -20,6 +20,9 @@ test("all clients share one remote URL and notification-only instructions", (t) 
   const prompt = fs.readFileSync(path.join(env.home, ".claude", "CLAUDE.md"), "utf8");
   assert.match(prompt, /CATM is notification-only/u);
   assert.doesNotMatch(prompt, /request_author_decision|wait_author_decision/u);
+  assert.match(prompt, /notify_author/u);
+  assert.match(prompt, /any number of times/u);
+  assert.doesNotMatch(prompt, /exactly once/u);
   assert.match(prompt, /exact complete user-visible final response/u);
   assert.match(prompt, /same response to the user without edits/u);
 });

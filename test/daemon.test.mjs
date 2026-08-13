@@ -56,7 +56,7 @@ test("NAS daemon secures HTTP and exposes only notification tools", async (t) =>
   const clients = await Promise.all(["claude", "codex", "opencode"].map((name) => connect(`${base}/mcp`, token, name)));
   t.after(async () => { await Promise.allSettled(clients.map((client) => client.close())); await daemon.close(); });
   const tools = await clients[0].listTools();
-  assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["notify_work_completed", "sync_session"]);
+  assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["notify_author", "notify_work_completed", "sync_session"]);
 
   const sessions = await Promise.all(clients.map((client, index) => client.callTool({ name: "sync_session", arguments: {
     agent: ["claude", "codex", "opencode"][index], workspace: `/work/${index}`, label: `Session ${index}`, status: "working", stage: "Started",
@@ -67,6 +67,15 @@ test("NAS daemon secures HTTP and exposes only notification tools", async (t) =>
   assert.ok(sessions.every((item) => !("pending_decisions" in item.structuredContent)));
 
   const session = sessions[0].structuredContent;
+  const firstNotice = await clients[0].callTool({ name: "notify_author", arguments: { session_id: session.session_id, work_cycle_id: session.work_cycle_id, message: "First update" } });
+  const secondNotice = await clients[0].callTool({ name: "notify_author", arguments: { session_id: session.session_id, work_cycle_id: session.work_cycle_id, message: "Second update" } });
+  assert.equal(firstNotice.structuredContent.notification_id, "N1");
+  assert.equal(secondNotice.structuredContent.notification_id, "N2");
+  assert.equal(firstNotice.structuredContent.status, "working");
+  assert.equal(secondNotice.structuredContent.status, "working");
+  assert.ok(notices.at(-2).endsWith("First update"));
+  assert.ok(notices.at(-1).endsWith("Second update"));
+
   await clients[0].callTool({ name: "notify_work_completed", arguments: { session_id: session.session_id, work_cycle_id: session.work_cycle_id, summary: "Done", verification: "Passed" } });
   assert.match(notices.at(-1), /Agent: claude · Session: S1 · Work cycle: W1/u);
   assert.match(notices.at(-1), /Workspace: \/work\/0/u);

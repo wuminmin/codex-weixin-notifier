@@ -98,12 +98,15 @@ After binding, inbound text is silently ignored. CATM never records a phone repl
 
 ## Notification behavior
 
-Agents use two MCP tools:
+Agents use three MCP tools:
 
 - `sync_session`
+- `notify_author`
 - `notify_work_completed`
 
 `sync_session` registers the agent session and maintains its work-cycle identity. CATM does not collect author decisions or deliver remote instructions. When input is required, the agent asks in its active conversation.
+
+`notify_author` sends proactive progress, warning, or informational messages. It is deliberately non-idempotent: agents may call it any number of times in the same work cycle, and every call produces a separate outbound notification without changing the session status.
 
 Completion notifications prepend the agent type, session id, work-cycle id, workspace, and task label so one author bot can distinguish multiple agents and multiple working directories. The remaining notification body is the agent's exact final user-visible response. Agents pass that response unchanged in `notify_work_completed.summary`; `verification` is retained as internal metadata and is not rendered.
 

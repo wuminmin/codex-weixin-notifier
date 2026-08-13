@@ -23,6 +23,21 @@ test("sessions are independent and completion rotates work cycles", async (t) =>
   assert.equal(completion.workCycleId, "W1");
 });
 
+test("author notifications are unlimited within a work cycle and do not change session status", async (t) => {
+  const env = tempEnvironment(); t.after(env.cleanup);
+  const store = new TenantStore({ paths: env.paths, tenantId: "default" });
+  const session = await sync(store);
+
+  const first = await store.createAuthorNotification({ session_id: session.session_id, work_cycle_id: session.work_cycle_id, message: "First" });
+  const second = await store.createAuthorNotification({ session_id: session.session_id, work_cycle_id: session.work_cycle_id, message: "Second" });
+
+  assert.equal(first.notificationId, "N1");
+  assert.equal(second.notificationId, "N2");
+  assert.equal(first.workCycleId, second.workCycleId);
+  assert.equal(store.getSession(session.session_id).status, "working");
+  assert.equal(Object.keys(store.read().notifications).length, 2);
+});
+
 test("legacy pending decisions do not affect notification-only session sync or completion", async (t) => {
   const env = tempEnvironment(); t.after(env.cleanup);
   const store = new TenantStore({ paths: env.paths, tenantId: "default" });

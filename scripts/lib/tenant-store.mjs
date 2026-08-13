@@ -26,11 +26,12 @@ function emptyState(tenantId) {
   return {
     version: 1,
     tenantId,
-    counters: { session: 0, instruction: 0, decision: 0 },
+    counters: { session: 0, instruction: 0, decision: 0, notification: 0 },
     sessions: {},
     inbox: {},
     decisions: {},
     completions: {},
+    notifications: {},
     authors: {},
     conversations: {},
     bindingCodes: {},
@@ -41,6 +42,8 @@ function emptyState(tenantId) {
 function normalizeState(state, tenantId) {
   if (!state) return emptyState(tenantId);
   if (state.version !== 1 || state.tenantId !== tenantId) throw new Error(`Invalid tenant registry: ${tenantId}`);
+  state.counters.notification ||= 0;
+  state.notifications ||= {};
   return state;
 }
 
@@ -319,6 +322,38 @@ export class TenantStore {
       session.stage = "Waiting for the next work cycle";
       session.lastSyncAt = now();
       return completion;
+    });
+  }
+
+  async createAuthorNotification(input) {
+    return this.mutate((state) => {
+      const sessionId = String(input.session_id || "").toUpperCase();
+      const session = state.sessions[sessionId];
+      if (!session || session.status === "closed") throw new Error("session not found");
+      const expected = `W${session.workCycle}`;
+      if (String(input.work_cycle_id || "").toUpperCase() !== expected) throw new Error(`work_cycle_id must be ${expected}`);
+      const notificationId = `N${++state.counters.notification}`;
+      const notification = {
+        tenantId: this.tenantId,
+        notificationId,
+        sessionId,
+        workCycleId: expected,
+        message: cleanText(input.message, 12000, "message"),
+        delivery: [],
+        createdAt: now(),
+      };
+      state.notifications[notificationId] = notification;
+      return notification;
+    });
+  }
+
+  async recordAuthorNotificationDelivery(notificationId, delivery) {
+    return this.mutate((state) => {
+      const notification = state.notifications[String(notificationId || "").toUpperCase()];
+      if (!notification) throw new Error("notification not found");
+      notification.delivery = delivery;
+      notification.deliveredAt = now();
+      return notification;
     });
   }
 

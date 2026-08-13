@@ -88,3 +88,13 @@ export function formatCompletionMessage(completion, session) {
     completion.summary,
   ].join("\n");
 }
+
+export function formatAuthorNotification(notification, session) {
+  return [
+    `Agent: ${session.agent} · Session: ${session.sessionId} · Work cycle: ${notification.workCycleId}`,
+    `Workspace: ${session.workspace}`,
+    `Task: ${session.label}`,
+    "",
+    notification.message,
+  ].join("\n");
+}
